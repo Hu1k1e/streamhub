@@ -178,8 +178,14 @@ function getTorrent(magnetURI, callback) {
 // ─── Direct file lookup (fast path for pre-existing downloads) ────────────────
 const VIDEO_EXTS_RE = /\.(mp4|m4v|mkv|webm|avi|ts|mov|m2ts|mpeg|mpg)$/i;
 
-/** Scan download paths for a video file matching the torrent name. Returns full path or null. */
+/** Scan download paths for an existing COMPLETE video file matching the torrent name.
+ * IMPORTANT: returns null if the torrent is currently managed by WebTorrent —
+ * in that case WebTorrent handles streaming (avoids serving partially-written files). */
 function findExistingFile(magnetURI) {
+    const key = getInfoHash(magnetURI) || magnetURI;
+    // If WebTorrent is already managing this torrent (downloading or ready), don't bypass it
+    if (activeTorrents.has(key) || pendingCallbacks.has(key)) return null;
+
     const searchDirs = [DEFAULT_DL_PATH, FALLBACK_DL_PATH].filter(Boolean);
     if (!searchDirs.length) return null;
     try {
@@ -189,18 +195,19 @@ function findExistingFile(magnetURI) {
             if (!fs.existsSync(baseDir)) continue;
             const entries = fs.readdirSync(baseDir, { withFileTypes: true });
             for (const entry of entries) {
-                // Match by torrent name (folder) or loose file in root
                 const nameMatch = torrentName && entry.name === torrentName;
                 if (entry.isDirectory() && nameMatch) {
                     const subDir = path.join(baseDir, entry.name);
                     const videoFile = fs.readdirSync(subDir)
                         .filter(f => VIDEO_EXTS_RE.test(f))
-                        .map(f => ({ name: f, size: fs.statSync(path.join(subDir, f)).size }))
+                        .map(f => { const fp = path.join(subDir, f); return { name: f, size: fs.statSync(fp).size }; })
+                        .filter(f => f.size > 10 * 1024 * 1024) // only files > 10 MB (exclude stubs)
                         .sort((a, b) => b.size - a.size)[0];
                     if (videoFile) return path.join(subDir, videoFile.name);
                 }
                 if (entry.isFile() && VIDEO_EXTS_RE.test(entry.name) && nameMatch) {
-                    return path.join(baseDir, entry.name);
+                    const fSize = fs.statSync(path.join(baseDir, entry.name)).size;
+                    if (fSize > 10 * 1024 * 1024) return path.join(baseDir, entry.name);
                 }
             }
         }
@@ -208,34 +215,50 @@ function findExistingFile(magnetURI) {
     return null;
 }
 
+
 /** Serve a file from disk directly (fast, no WebTorrent hash check). */
 function serveFileFromDisk(filePath, req, res) {
-    const total = fs.statSync(filePath).size;
-    const ext = filePath.toLowerCase().split('.').pop();
-    let mimeType = 'video/mp4';
-    if (ext === 'mkv') mimeType = 'video/x-matroska';
-    else if (ext === 'webm') mimeType = 'video/webm';
-    else if (ext === 'avi') mimeType = 'video/x-msvideo';
+    try {
+        const total = fs.statSync(filePath).size;
+        const ext = filePath.toLowerCase().split('.').pop();
+        let mimeType = 'video/mp4';
+        if (ext === 'mkv') mimeType = 'video/x-matroska';
+        else if (ext === 'webm') mimeType = 'video/webm';
+        else if (ext === 'avi') mimeType = 'video/x-msvideo';
 
-    const range = req.headers.range;
-    const start = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
-    const end = (range && range.replace(/bytes=/, '').split('-')[1])
-        ? parseInt(range.replace(/bytes=/, '').split('-')[1], 10) : total - 1;
-    const chunksize = end - start + 1;
+        const range = req.headers.range;
+        let start = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
+        let end = (range && range.replace(/bytes=/, '').split('-')[1])
+            ? parseInt(range.replace(/bytes=/, '').split('-')[1], 10) : total - 1;
 
-    console.log(`[▶] Direct-file serve: ${path.basename(filePath)} (${(total / 1024 / 1024 / 1024).toFixed(2)} GB) bytes ${start}-${end}`);
-    res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${total}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': mimeType,
-    });
-    const stream = fs.createReadStream(filePath, { start, end });
-    stream.on('error', () => { });
-    res.on('error', () => { });
-    stream.pipe(res);
-    req.on('close', () => stream.destroy());
+        // Safety: clamp to valid range
+        if (isNaN(start) || start < 0) start = 0;
+        if (isNaN(end) || end >= total) end = total - 1;
+        if (start >= total) {
+            res.writeHead(416, { 'Content-Range': `bytes */${total}` });
+            return res.end();
+        }
+        if (start > end) end = total - 1; // malformed range — serve from start to EOF
+
+        const chunksize = end - start + 1;
+        console.log(`[▶] Direct-file serve: ${path.basename(filePath)} (${(total / 1024 / 1024 / 1024).toFixed(2)} GB) bytes ${start}-${end}`);
+        res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${total}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': chunksize,
+            'Content-Type': mimeType,
+        });
+        const stream = fs.createReadStream(filePath, { start, end });
+        stream.on('error', (err) => { console.warn('[!] Direct stream error:', err.message); });
+        res.on('error', () => { });
+        stream.pipe(res);
+        req.on('close', () => stream.destroy());
+    } catch (err) {
+        console.error('[!] serveFileFromDisk error:', err.message);
+        if (!res.headersSent) res.status(500).send('File serve error');
+    }
 }
+
 
 // ─── Startup cleanup: remove directories older than 12h ──────────────────────
 function runStartupCleanup() {
