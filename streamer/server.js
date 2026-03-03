@@ -6,24 +6,57 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { EventEmitter } from 'events';
 
-EventEmitter.defaultMaxListeners = 50;
+EventEmitter.defaultMaxListeners = 100;
+
+const PORT = 6987;
+const MAX_ACTIVE_TORRENTS = 5; // evict oldest idle torrent when limit reached
 
 const app = express();
 app.use(cors());
 
-const client = new WebTorrent();
+// ─── Self-healing WebTorrent client ───────────────────────────────────────────
+let client;
+let clientErrorCount = 0;
+const MAX_CLIENT_ERRORS = 3;
 
-client.on('error', (err) => {
-    console.error('[!] WebTorrent Client Error:', err.message);
-});
+function createClient() {
+    if (client) {
+        try { client.destroy(() => { }); } catch { }
+    }
+    clientErrorCount = 0;
+    client = new WebTorrent({ maxConns: 30 }); // cap peer connections per torrent
+    client.on('error', (err) => {
+        clientErrorCount++;
+        console.error(`[!] WebTorrent Client Error (${clientErrorCount}/${MAX_CLIENT_ERRORS}):`, err.message);
+        if (clientErrorCount >= MAX_CLIENT_ERRORS) {
+            console.warn('[!] Too many client errors — recreating WebTorrent client...');
+            // Clear our maps so old references don't linger
+            activeTorrents.clear();
+            pendingCallbacks.clear();
+            createClient();
+        }
+    });
+    console.log('[✓] WebTorrent client ready');
+    return client;
+}
+createClient();
+
+// ─── Crash guards ─────────────────────────────────────────────────────────────
 process.on('uncaughtException', (err) => {
     if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return;
-    console.error('[!] Uncaught Exception:', err);
+    if (err.code === 'EADDRINUSE') {
+        console.error(`[!] Port ${PORT} is already in use — another streamer instance is running.`);
+        console.error('[!] Kill the existing process and restart.');
+        process.exit(1); // start.bat loop will kill zombie and retry
+    }
+    console.error('[!] Uncaught Exception:', err.message);
+    // Don't crash — keep serving existing requests
 });
 process.on('unhandledRejection', (reason) => {
     if (reason && (reason.name === 'AbortError' || reason.code === 'ABORT_ERR')) return;
-    console.error('[!] Unhandled Rejection:', reason);
+    console.error('[!] Unhandled Rejection:', reason?.message || reason);
 });
+
 
 // ─── Storage Configuration ─────────────────────────────────────────────────────
 const DEFAULT_DL_PATH = process.env.DEFAULT_DL_PATH || null;
@@ -100,6 +133,18 @@ function getTorrent(magnetURI, callback) {
     }
 
     // ④  First caller — initiate add
+    // Evict oldest idle torrent if at the limit (prevents file-handle/connection exhaustion)
+    if (activeTorrents.size >= MAX_ACTIVE_TORRENTS) {
+        for (const [evictKey, t] of activeTorrents) {
+            if ((t.activeConnections || 0) === 0) {
+                console.log(`[~] Evicting idle torrent to stay under limit: ${t.name || evictKey}`);
+                try { t.destroy({ destroyStore: false }, () => { }); } catch { }
+                activeTorrents.delete(evictKey);
+                break;
+            }
+        }
+    }
+
     console.log(`[+] Adding torrent: ${magnetURI.substring(0, 60)}...`);
     pendingCallbacks.set(key, [callback]);
 
@@ -347,12 +392,19 @@ app.get('/status', (req, res) => {
     res.json({ name: torrent.name, downloadSpeed: torrent.downloadSpeed, uploadSpeed: torrent.uploadSpeed, progress: torrent.progress, numPeers: torrent.numPeers, timeRemaining: torrent.timeRemaining });
 });
 
-const PORT = 6987;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log('====================================================');
     console.log(`🚀 WebTorrent Streamer running on port ${PORT}`);
     console.log(`📡 Primary path  : ${DEFAULT_DL_PATH || '(WebTorrent default)'}`);
     console.log(`📦 Fallback path : ${FALLBACK_DL_PATH}`);
     console.log(`📏 Large file threshold: ${LARGE_FILE_THRESHOLD_GB} GB`);
+    console.log(`🎭 Max active torrents: ${MAX_ACTIVE_TORRENTS}`);
     console.log('====================================================');
+});
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`[!] Port ${PORT} already in use. Exiting so start.bat can kill the zombie and retry.`);
+        process.exit(1);
+    }
+    console.error('[!] Server error:', err.message);
 });
