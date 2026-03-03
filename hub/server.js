@@ -256,7 +256,7 @@ function determineDirectPlay(fileInfo, caps) {
                 : caps.canH264;
 
     // Container support (desktop plays MKV even when canPlayType returns false)
-    const isSafari = req.query.safari === '1'; // used only for container logic below
+    const isSafari = !!caps.isSafari; // passed in from probe handler
     let containerOk = (ext === 'mp4' || ext === 'm4v') ? caps.canH264
         : ext === 'webm' ? caps.canVP9 || caps.canAV1
             : ext === 'mkv' ? caps.canMkv
@@ -284,6 +284,7 @@ app.get('/api/probe', async (req, res) => {
 
     // Client-supplied capability flags (from DEVICE_PROFILE.canPlayType tests)
     const caps = {
+        isSafari: req.query.safari === '1',
         canHevc: req.query.canHevc === '1',
         canH264: req.query.canH264 !== '0', // default true (almost all browsers)
         canVP9: req.query.canVP9 === '1',
