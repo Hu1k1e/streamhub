@@ -228,9 +228,37 @@ async function fetchSources(title, year) {
     } catch { loader.innerHTML = '<span style="color:#ff6b6b;"><i class="fa-solid fa-triangle-exclamation"></i> Error querying Prowlarr.</span>'; }
 }
 
+// ─── Device Capability Profile (Jellyfin-style) ───────────────────────────────
+// Built once at startup using canPlayType() — instantaneous, no network calls.
+// canPlayType returns 'probably' | 'maybe' | '' — we treat both truthy values as supported.
+const DEVICE_PROFILE = (() => {
+    const v = document.createElement('video');
+    const can = (mime, codec) => {
+        const r = v.canPlayType(codec ? `${mime}; codecs="${codec}"` : mime);
+        return r === 'probably' || r === 'maybe';
+    };
+    const profile = {
+        // Video codec support
+        h264: can('video/mp4', 'avc1.42E01E') || can('video/mp4', 'avc1.640028'),
+        hevc: can('video/mp4', 'hev1.1.6.L93.B0') || can('video/mp4', 'hvc1.1.6.L93.B0') ||
+            can('video/mp4', 'hev1') || can('video/mp4', 'hvc1'),
+        vp9: can('video/webm', 'vp9') || can('video/webm', 'vp9.0'),
+        av1: can('video/mp4', 'av01.0.05M.08') || can('video/webm', 'av01.0.05M.08'),
+        // Container support
+        mp4: can('video/mp4'),
+        mkv: can('video/x-matroska') || can('video/mkv'),
+        webm: can('video/webm'),
+        avi: can('video/avi') || can('video/x-msvideo'),
+        // Native HLS (Safari/iOS)
+        nativeHls: v.canPlayType('application/vnd.apple.mpegurl') !== '',
+    };
+    console.log('[DEVICE_PROFILE]', JSON.stringify(profile));
+    return profile;
+})();
+
 // ─── Client-side codec detection from magnet dn= ─────────────────────────────
-// Decides play mode from the filename in the magnet URI — zero network calls.
-// Returns null if dn= is absent (fall back to server probe).
+// Decides play mode from the filename — zero network calls.
+// Returns null if dn= absent (server probe fallback).
 function quickProbeFromMagnet(magnet) {
     try {
         const dn = new URLSearchParams(magnet.replace(/^magnet:\?/i, '')).get('dn');
@@ -238,16 +266,48 @@ function quickProbeFromMagnet(magnet) {
         const name = decodeURIComponent(dn);
         const nameLower = name.toLowerCase();
         const ext = nameLower.split('.').pop();
+
+        // Detect video codec from filename hints
         const isHEVC = /\b(x265|hevc|h\.?265)\b/.test(nameLower);
-        if (IS_SAFARI) {
-            // Safari/iOS: only direct-plays H.264 in mp4/m4v
-            const canDirect = (ext === 'mp4' || ext === 'm4v') && !isHEVC;
-            return { canDirectPlay: canDirect, codec: canDirect ? 'h264' : 'hevc', container: ext, resolution: 'unknown', fileName: name };
+        const isAV1 = /\bav1\b/.test(nameLower);
+        const isVP9 = /\bvp9\b/.test(nameLower);
+
+        // Check if device supports this codec
+        const codecOk = isHEVC ? DEVICE_PROFILE.hevc
+            : isAV1 ? DEVICE_PROFILE.av1
+                : isVP9 ? DEVICE_PROFILE.vp9
+                    : DEVICE_PROFILE.h264;
+        const codec = isHEVC ? 'hevc' : isAV1 ? 'av1' : isVP9 ? 'vp9' : 'h264';
+
+        // Container check — note: Chrome reports mkv as unsupported via canPlayType
+        // but CAN actually play H.264/VP9 MKV in practice, so we allow it on non-Safari.
+        let containerOk;
+        if (ext === 'mp4' || ext === 'm4v') {
+            containerOk = DEVICE_PROFILE.mp4;
+        } else if (ext === 'webm') {
+            containerOk = DEVICE_PROFILE.webm;
+        } else if (ext === 'mkv') {
+            // Allow MKV on non-Safari devices even if canPlayType returns false
+            containerOk = !IS_SAFARI || DEVICE_PROFILE.mkv;
+        } else if (ext === 'avi') {
+            containerOk = DEVICE_PROFILE.avi;
+        } else {
+            containerOk = true; // Unknown container — let browser decide
         }
-        // Desktop Chrome/Firefox/Edge: everything except HEVC direct-plays
-        return { canDirectPlay: !isHEVC, codec: isHEVC ? 'hevc' : 'h264', container: ext, resolution: 'unknown', fileName: name };
+
+        // Safari/iOS: also requires native HLS path for unsupported content
+        // For direct play, Safari ONLY handles mp4/m4v reliably
+        if (IS_SAFARI && ext !== 'mp4' && ext !== 'm4v') {
+            containerOk = false; // Force transcode via HLS for non-MP4 on Safari
+        }
+
+        const canDirectPlay = codecOk && containerOk;
+        console.log(`[QuickProbe] ${name} | codec:${codec}(${codecOk}) container:${ext}(${containerOk}) → ${canDirectPlay ? 'Direct' : 'Transcode'}`);
+
+        return { canDirectPlay, codec, container: ext, resolution: 'unknown', fileName: name };
     } catch { return null; }
 }
+
 
 // ─── Stream Entry Point ───────────────────────────────────────────────────────
 async function startStream(magnetUri, pushToHistory = true) {
@@ -282,7 +342,7 @@ async function startStream(magnetUri, pushToHistory = true) {
         if (quickProbe !== null) {
             console.log('[Player] Quick probe (client-side):', quickProbe);
             // Fire probe in background — only for server-side warmup, we don't await it
-            fetch(`/api/probe?magnet=${encodeURIComponent(magnet)}&safari=${IS_SAFARI ? '1' : '0'}`).catch(() => { });
+            fetch(`/api/probe?${buildProbeParams(magnet)}`).catch(() => { });
 
             if (quickProbe.canDirectPlay) {
                 startDirectPlay(magnet, video, overlay, statusText, pctText, barCont, barFill);
@@ -309,11 +369,24 @@ async function startStream(magnetUri, pushToHistory = true) {
     }
 }
 
+function buildProbeParams(magnet) {
+    const p = new URLSearchParams({
+        magnet,
+        safari: IS_SAFARI ? '1' : '0',
+        canHevc: DEVICE_PROFILE.hevc ? '1' : '0',
+        canH264: DEVICE_PROFILE.h264 ? '1' : '0',
+        canVP9: DEVICE_PROFILE.vp9 ? '1' : '0',
+        canAV1: DEVICE_PROFILE.av1 ? '1' : '0',
+        canMkv: (!IS_SAFARI) ? '1' : '0',  // Desktop plays MKV even if canPlayType says no
+    });
+    return p.toString();
+}
+
 async function probeWithRetry(magnet, maxAttempts, delayMs) {
-    const safari = IS_SAFARI ? '1' : '0';
+    const params = buildProbeParams(magnet);
     for (let i = 0; i < maxAttempts; i++) {
         try {
-            const res = await fetch(`/api/probe?magnet=${encodeURIComponent(magnet)}&safari=${safari}`);
+            const res = await fetch(`/api/probe?${params}`);
             const data = await res.json();
             if (data.status === 'ready' || data.status === 'error') return data;
             console.log(`[Player] Probe pending (${i + 1}/${maxAttempts})...`);
@@ -321,7 +394,7 @@ async function probeWithRetry(magnet, maxAttempts, delayMs) {
         await new Promise(r => setTimeout(r, delayMs));
     }
     console.warn('[Player] Probe timed out — defaulting to direct play');
-    return { status: 'error', canDirectPlay: !IS_SAFARI, codec: 'unknown', container: 'unknown' };
+    return { status: 'error', canDirectPlay: DEVICE_PROFILE.h264, codec: 'unknown', container: 'unknown' };
 }
 
 // ─── Direct Play ──────────────────────────────────────────────────────────────

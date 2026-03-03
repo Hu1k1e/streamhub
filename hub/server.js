@@ -242,41 +242,61 @@ function parseMagnetDn(magnetURI) {
     return null;
 }
 
-function determineDirectPlay(fileInfo, isSafari) {
+function determineDirectPlay(fileInfo, caps) {
     const name = (fileInfo.name || '').toLowerCase();
     const ext = (fileInfo.extension || '').toLowerCase();
-    // HEVC/H.265 cannot be decoded natively by most browsers
     const isHEVC = /\bx265\b|\bhevc\b|\bh\.?265\b/.test(name);
-    if (isSafari) {
-        // Safari/iOS: only H.264 in MP4
-        return (ext === 'mp4' || ext === 'm4v') && !isHEVC;
-    }
-    // Desktop Chrome/Firefox/Edge: everything except HEVC direct-plays fine
-    return !isHEVC;
+    const isAV1 = /\bav1\b/.test(name);
+    const isVP9 = /\bvp9\b/.test(name);
+
+    // Codec support from client's canPlayType() results
+    const codecOk = isHEVC ? caps.canHevc
+        : isAV1 ? caps.canAV1
+            : isVP9 ? caps.canVP9
+                : caps.canH264;
+
+    // Container support (desktop plays MKV even when canPlayType returns false)
+    const containerOk = (ext === 'mp4' || ext === 'm4v') ? caps.canH264
+        : ext === 'webm' ? caps.canVP9 || caps.canAV1
+            : ext === 'mkv' ? caps.canMkv
+                : ext === 'avi' ? false   // AVI: always transcode (browser support is poor)
+                    : true;
+
+    return codecOk && containerOk;
 }
 
 // â”€â”€â”€ Probe endpoint â€” instant, no ffprobe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/probe', async (req, res) => {
     const magnetURI = req.query.magnet;
-    const isSafari = req.query.safari === '1';
     if (!magnetURI) return res.status(400).json({ error: 'Missing magnet' });
+
+    // Client-supplied capability flags (from DEVICE_PROFILE.canPlayType tests)
+    const caps = {
+        canHevc: req.query.canHevc === '1',
+        canH264: req.query.canH264 !== '0', // default true (almost all browsers)
+        canVP9: req.query.canVP9 === '1',
+        canAV1: req.query.canAV1 === '1',
+        canMkv: req.query.canMkv !== '0', // default true (desktop default)
+    };
 
     // Fast path: parse filename from magnet dn= (zero network calls, instant)
     const dnInfo = parseMagnetDn(magnetURI);
     if (dnInfo) {
         // Warm up torrent in background while player prepares
         axios.get(`${STREAMER_URL}/info?magnet=${encodeURIComponent(magnetURI)}`, { timeout: 15000 }).catch(() => { });
-        const canDirectPlay = determineDirectPlay(dnInfo, isSafari);
-        console.log(`[Hub/probe] ${dnInfo.name} | ${isSafari ? 'Safari' : 'Desktop'} â†’ ${canDirectPlay ? 'Direct âœ“' : 'HEVC â†’ Transcode'}`);
-        return res.json({ status: 'ready', canDirectPlay, codec: canDirectPlay ? 'h264' : 'hevc', container: dnInfo.extension, resolution: 'unknown', fileName: dnInfo.name, fileSize: 0 });
+        const canDirectPlay = determineDirectPlay(dnInfo, caps);
+        const codec = /\bx265\b|\bhevc\b|\bh\.?265\b/.test(dnInfo.name.toLowerCase()) ? 'hevc' : 'h264';
+        console.log(`[Hub/probe] ${dnInfo.name} | hevc:${caps.canHevc} h264:${caps.canH264} → ${canDirectPlay ? 'Direct ✓' : codec + ' → Transcode'}`);
+        return res.json({ status: 'ready', canDirectPlay, codec: canDirectPlay ? 'h264' : codec, container: dnInfo.extension, resolution: 'unknown', fileName: dnInfo.name, fileSize: 0 });
     }
 
     // Slow path: no dn= in magnet â€” ask streamer for filename
     try {
         const fileInfo = (await axios.get(`${STREAMER_URL}/info?magnet=${encodeURIComponent(magnetURI)}`, { timeout: 60000 })).data;
-        const canDirectPlay = determineDirectPlay(fileInfo, isSafari);
-        console.log(`[Hub/probe] ${fileInfo.name} | ${isSafari ? 'Safari' : 'Desktop'} â†’ ${canDirectPlay ? 'Direct âœ“' : 'Transcode'}`);
-        return res.json({ status: 'ready', canDirectPlay, codec: canDirectPlay ? 'h264' : 'hevc', container: fileInfo.extension, resolution: 'unknown', fileName: fileInfo.name, fileSize: fileInfo.size });
+        const canDirectPlay = determineDirectPlay(fileInfo, caps);
+        const codec = /\bx265\b|\bhevc\b|\bh\.?265\b/.test((fileInfo.name || '').toLowerCase()) ? 'hevc' : 'h264';
+        console.log(`[Hub/probe] ${fileInfo.name} | hevc:${caps.canHevc} → ${canDirectPlay ? 'Direct ✓' : 'Transcode'}`);
+        return res.json({ status: 'ready', canDirectPlay, codec: canDirectPlay ? 'h264' : codec, container: fileInfo.extension, resolution: 'unknown', fileName: fileInfo.name, fileSize: fileInfo.size });
     } catch (e) {
         return res.json({ status: 'pending', message: 'Fetching torrent metadata...' });
     }
