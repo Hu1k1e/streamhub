@@ -24,7 +24,7 @@ function createClient() {
         try { client.destroy(() => { }); } catch { }
     }
     clientErrorCount = 0;
-    client = new WebTorrent({ maxConns: 30 }); // cap peer connections per torrent
+    client = new WebTorrent({ maxConns: 30, dhtPort: 6988, torrentPort: 6989 }); // fixed ports so they don't conflict on restart
     client.on('error', (err) => {
         clientErrorCount++;
         console.error(`[!] WebTorrent Client Error (${clientErrorCount}/${MAX_CLIENT_ERRORS}):`, err.message);
@@ -44,10 +44,12 @@ createClient();
 // ─── Crash guards ─────────────────────────────────────────────────────────────
 process.on('uncaughtException', (err) => {
     if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return;
+    // Do NOT exit on EADDRINUSE here — WebTorrent uses its own internal ports (DHT, BT TCP).
+    // Those ports get EADDRINUSE during restart until TIME_WAIT clears, and WebTorrent
+    // handles retrying them internally. Only server.on('error') handles the real port 6987 case.
     if (err.code === 'EADDRINUSE') {
-        console.error(`[!] Port ${PORT} is already in use — another streamer instance is running.`);
-        console.error('[!] Kill the existing process and restart.');
-        process.exit(1); // start.bat loop will kill zombie and retry
+        console.warn('[!] Internal port conflict (WebTorrent DHT/etc.) — ignoring:', err.message);
+        return; // Let WebTorrent retry internally
     }
     console.error('[!] Uncaught Exception:', err.message);
     // Don't crash — keep serving existing requests
