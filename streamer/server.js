@@ -94,6 +94,24 @@ function pickDownloadPath(fileSizeBytes) {
 const activeTorrents = new Map(); // infoHash → torrent
 const pendingCallbacks = new Map(); // infoHash → [callbacks...]
 
+// ─── Idle soft-reset ──────────────────────────────────────────────────────────
+// After 15 minutes with no active or pending torrents, silently recreate the
+// WebTorrent client so accumulated internal state (stale peers, half-open sockets)
+// doesn't degrade the next session. No ports are killed, no HTTP server restart.
+let lastActivityAt = Date.now();
+function touchActivity() { lastActivityAt = Date.now(); }
+
+setInterval(() => {
+    const idleMs = Date.now() - lastActivityAt;
+    const idleMinutes = idleMs / 1000 / 60;
+    if (activeTorrents.size === 0 && pendingCallbacks.size === 0 && idleMinutes >= 15) {
+        console.log(`[~] Idle for ${idleMinutes.toFixed(0)} min — soft-resetting WebTorrent client...`);
+        createClient();
+        lastActivityAt = Date.now(); // reset so we don't immediately recreate again
+    }
+}, 5 * 60 * 1000); // check every 5 minutes
+
+
 /** Extract the 40-char hex info-hash from any magnet URI. */
 function getInfoHash(magnetURI) {
     try {
@@ -148,7 +166,9 @@ function getTorrent(magnetURI, callback) {
     }
 
     console.log(`[+] Adding torrent: ${magnetURI.substring(0, 60)}...`);
+    touchActivity(); // reset idle timer whenever there's new torrent activity
     pendingCallbacks.set(key, [callback]);
+
 
     const dlPath = DEFAULT_DL_PATH || FALLBACK_DL_PATH || undefined;
     const addOpts = dlPath ? { path: dlPath } : {};
