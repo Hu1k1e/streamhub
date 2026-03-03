@@ -228,6 +228,27 @@ async function fetchSources(title, year) {
     } catch { loader.innerHTML = '<span style="color:#ff6b6b;"><i class="fa-solid fa-triangle-exclamation"></i> Error querying Prowlarr.</span>'; }
 }
 
+// ─── Client-side codec detection from magnet dn= ─────────────────────────────
+// Decides play mode from the filename in the magnet URI — zero network calls.
+// Returns null if dn= is absent (fall back to server probe).
+function quickProbeFromMagnet(magnet) {
+    try {
+        const dn = new URLSearchParams(magnet.replace(/^magnet:\?/i, '')).get('dn');
+        if (!dn) return null;
+        const name = decodeURIComponent(dn);
+        const nameLower = name.toLowerCase();
+        const ext = nameLower.split('.').pop();
+        const isHEVC = /\b(x265|hevc|h\.?265)\b/.test(nameLower);
+        if (IS_SAFARI) {
+            // Safari/iOS: only direct-plays H.264 in mp4/m4v
+            const canDirect = (ext === 'mp4' || ext === 'm4v') && !isHEVC;
+            return { canDirectPlay: canDirect, codec: canDirect ? 'h264' : 'hevc', container: ext, resolution: 'unknown', fileName: name };
+        }
+        // Desktop Chrome/Firefox/Edge: everything except HEVC direct-plays
+        return { canDirectPlay: !isHEVC, codec: isHEVC ? 'hevc' : 'h264', container: ext, resolution: 'unknown', fileName: name };
+    } catch { return null; }
+}
+
 // ─── Stream Entry Point ───────────────────────────────────────────────────────
 async function startStream(magnetUri, pushToHistory = true) {
     if (pushToHistory) history.pushState({ view: 'player', magnetUri }, 'Playing', '/play');
@@ -251,15 +272,30 @@ async function startStream(magnetUri, pushToHistory = true) {
     video.play().catch(() => { });
 
     try {
-        // Step 1: Resolve magnet
+        // Step 1: Resolve magnet (fast — just parses URL or fetches .torrent)
         const magnetData = await (await fetch(`/api/get-magnet?url=${encodeURIComponent(magnetUri)}`)).json();
         if (magnetData.error) throw new Error(magnetData.error);
         const magnet = magnetData.magnetUrl;
 
-        // Step 2: Probe codec with retry (streamer may still be fetching metadata)
+        // Step 2: Fast-path — decide from magnet dn= filename (no network call)
+        const quickProbe = quickProbeFromMagnet(magnet);
+        if (quickProbe !== null) {
+            console.log('[Player] Quick probe (client-side):', quickProbe);
+            // Fire probe in background — only for server-side warmup, we don't await it
+            fetch(`/api/probe?magnet=${encodeURIComponent(magnet)}&safari=${IS_SAFARI ? '1' : '0'}`).catch(() => { });
+
+            if (quickProbe.canDirectPlay) {
+                startDirectPlay(magnet, video, overlay, statusText, pctText, barCont, barFill);
+            } else {
+                await startHLSStream(magnet, quickProbe, video, overlay, statusText);
+            }
+            return;
+        }
+
+        // Step 3: Slow-path — no dn= in magnet, ask server (blocks until torrent metadata ready)
         statusText.innerText = 'Checking stream compatibility...';
         const probe = await probeWithRetry(magnet, 6, 5000);
-        console.log('[Player] Probe:', probe);
+        console.log('[Player] Server probe:', probe);
 
         if (probe.canDirectPlay) {
             startDirectPlay(magnet, video, overlay, statusText, pctText, barCont, barFill);
@@ -291,19 +327,19 @@ async function probeWithRetry(magnet, maxAttempts, delayMs) {
 // ─── Direct Play ──────────────────────────────────────────────────────────────
 function startDirectPlay(magnet, video, overlay, statusText, pctText, barCont, barFill) {
     console.log('[Player] Direct play ✓');
-    statusText.innerText = 'Connecting to stream...';
+    // Register callbacks BEFORE setting src so 'playing' fires with listener attached
+    setupVideoCallbacks(video, overlay, false);
     barCont.style.display = 'block';
     startProgressPolling(magnet, statusText, pctText, barFill);
 
-    // MUST register callbacks before setting src so the 'playing' event fires with listener attached
-    setupVideoCallbacks(video, overlay, false);
-
+    // Set src and play — do NOT call video.load() as it causes a double-fetch and stalls Chrome
     video.src = `/api/stream?magnet=${encodeURIComponent(magnet)}`;
-    video.load();
     video.play().catch(e => console.warn('Autoplay blocked:', e));
 
     reportStreamStart(false, 'h264', null);
 }
+
+
 
 
 // ─── HLS Transcoded Play ────────────────────────────────────────────────────────

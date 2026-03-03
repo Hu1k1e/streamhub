@@ -163,20 +163,14 @@ function handleStream(torrent, req, res, magnetURI) {
     else if (ext === 'avi') mimeType = 'video/x-msvideo';
 
     const range = req.headers.range;
-
-    if (!range) {
-        res.writeHead(200, { 'Content-Length': file.length, 'Content-Type': mimeType, 'Accept-Ranges': 'bytes' });
-        const stream = file.createReadStream();
-        stream.on('error', () => { });
-        stream.pipe(res);
-        req.on('close', () => onConnectionClose(torrent, magnetURI));
-        return;
-    }
-
-    const positions = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(positions[0], 10);
     const total = file.length;
-    const end = positions[1] ? parseInt(positions[1], 10) : total - 1;
+
+    // Always respond with 206 Partial Content — Chrome/Firefox reliably start playback
+    // from 206 responses. A 200 full-file response for MKV/large files can stall the browser.
+    const start = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
+    const end = (range && range.replace(/bytes=/, '').split('-')[1])
+        ? parseInt(range.replace(/bytes=/, '').split('-')[1], 10)
+        : total - 1;
     const chunksize = end - start + 1;
 
     res.writeHead(206, {
@@ -200,6 +194,7 @@ function handleStream(torrent, req, res, magnetURI) {
         console.error(`[!] Torrent error: ${err.message}`);
         if (!res.headersSent) res.status(500).send(`Torrent Error: ${err.message}`);
     });
+
 }
 
 function onConnectionClose(torrent, magnetURI) {
