@@ -279,8 +279,10 @@ function quickProbeFromMagnet(magnet) {
                     : DEVICE_PROFILE.h264;
         const codec = isHEVC ? 'hevc' : isAV1 ? 'av1' : isVP9 ? 'vp9' : 'h264';
 
-        // Container check — note: Chrome reports mkv as unsupported via canPlayType
-        // but CAN actually play H.264/VP9 MKV in practice, so we allow it on non-Safari.
+        // Container check — Chrome reports mkv as unsupported via canPlayType
+        // but CAN play H.264/VP9 MKV in practice, so we allow it on non-Safari.
+        const VIDEO_EXTS = new Set(['mp4', 'm4v', 'mkv', 'webm', 'avi', 'ts', 'mov', 'm2ts', 'mpeg', 'mpg']);
+        const extIsVideo = VIDEO_EXTS.has(ext);
         let containerOk;
         if (ext === 'mp4' || ext === 'm4v') {
             containerOk = DEVICE_PROFILE.mp4;
@@ -295,10 +297,11 @@ function quickProbeFromMagnet(magnet) {
             containerOk = true; // Unknown container — let browser decide
         }
 
-        // Safari/iOS: also requires native HLS path for unsupported content
-        // For direct play, Safari ONLY handles mp4/m4v reliably
-        if (IS_SAFARI && ext !== 'mp4' && ext !== 'm4v') {
-            containerOk = false; // Force transcode via HLS for non-MP4 on Safari
+        // Safari/iOS: restrict ONLY when we KNOW the container is non-MP4.
+        // If ext is e.g. 'h264-ethel' (release group, not a file ext), we don't know
+        // the actual container — allow direct play attempt (MP4 WEB rips play fine on iOS).
+        if (IS_SAFARI && extIsVideo && ext !== 'mp4' && ext !== 'm4v') {
+            containerOk = false; // Known non-MP4 container on Safari → transcode via HLS
         }
 
         const canDirectPlay = codecOk && containerOk;
@@ -307,6 +310,7 @@ function quickProbeFromMagnet(magnet) {
         return { canDirectPlay, codec, container: ext, resolution: 'unknown', fileName: name };
     } catch { return null; }
 }
+
 
 
 // ─── Stream Entry Point ───────────────────────────────────────────────────────

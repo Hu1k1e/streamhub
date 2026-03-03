@@ -312,7 +312,7 @@ app.post('/api/hls/start', async (req, res) => {
     console.log('[Hub/HLS] Warming up torrent...');
     for (let attempt = 0; attempt < 2; attempt++) {
         try {
-            await axios.get(`${STREAMER_URL}/info?magnet=${encodeURIComponent(magnet)}`, { timeout: 10000 });
+            await axios.get(`${STREAMER_URL}/info?magnet=${encodeURIComponent(magnet)}`, { timeout: 45000 });
             break; // success
         } catch (e) {
             if (attempt === 0 && e.response?.status === 500) {

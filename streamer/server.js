@@ -130,15 +130,109 @@ function getTorrent(magnetURI, callback) {
 }
 
 
+// ─── Direct file lookup (fast path for pre-existing downloads) ────────────────
+const VIDEO_EXTS_RE = /\.(mp4|m4v|mkv|webm|avi|ts|mov|m2ts|mpeg|mpg)$/i;
+
+/** Scan download paths for a video file matching the torrent name. Returns full path or null. */
+function findExistingFile(magnetURI) {
+    const searchDirs = [DEFAULT_DL_PATH, FALLBACK_DL_PATH].filter(Boolean);
+    if (!searchDirs.length) return null;
+    try {
+        const dn = new URLSearchParams(magnetURI.replace(/^magnet:\?/i, '')).get('dn');
+        const torrentName = dn ? decodeURIComponent(dn) : null;
+        for (const baseDir of searchDirs) {
+            if (!fs.existsSync(baseDir)) continue;
+            const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+            for (const entry of entries) {
+                // Match by torrent name (folder) or loose file in root
+                const nameMatch = torrentName && entry.name === torrentName;
+                if (entry.isDirectory() && nameMatch) {
+                    const subDir = path.join(baseDir, entry.name);
+                    const videoFile = fs.readdirSync(subDir)
+                        .filter(f => VIDEO_EXTS_RE.test(f))
+                        .map(f => ({ name: f, size: fs.statSync(path.join(subDir, f)).size }))
+                        .sort((a, b) => b.size - a.size)[0];
+                    if (videoFile) return path.join(subDir, videoFile.name);
+                }
+                if (entry.isFile() && VIDEO_EXTS_RE.test(entry.name) && nameMatch) {
+                    return path.join(baseDir, entry.name);
+                }
+            }
+        }
+    } catch (e) { console.warn('[!] findExistingFile error:', e.message); }
+    return null;
+}
+
+/** Serve a file from disk directly (fast, no WebTorrent hash check). */
+function serveFileFromDisk(filePath, req, res) {
+    const total = fs.statSync(filePath).size;
+    const ext = filePath.toLowerCase().split('.').pop();
+    let mimeType = 'video/mp4';
+    if (ext === 'mkv') mimeType = 'video/x-matroska';
+    else if (ext === 'webm') mimeType = 'video/webm';
+    else if (ext === 'avi') mimeType = 'video/x-msvideo';
+
+    const range = req.headers.range;
+    const start = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
+    const end = (range && range.replace(/bytes=/, '').split('-')[1])
+        ? parseInt(range.replace(/bytes=/, '').split('-')[1], 10) : total - 1;
+    const chunksize = end - start + 1;
+
+    console.log(`[▶] Direct-file serve: ${path.basename(filePath)} (${(total / 1024 / 1024 / 1024).toFixed(2)} GB) bytes ${start}-${end}`);
+    res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': mimeType,
+    });
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.on('error', () => { });
+    res.on('error', () => { });
+    stream.pipe(res);
+    req.on('close', () => stream.destroy());
+}
+
+// ─── Startup cleanup: remove directories older than 12h ──────────────────────
+function runStartupCleanup() {
+    const dirs = [DEFAULT_DL_PATH, FALLBACK_DL_PATH].filter(Boolean);
+    const cutoff = Date.now() - 12 * 60 * 60 * 1000;
+    for (const baseDir of dirs) {
+        if (!fs.existsSync(baseDir)) continue;
+        try {
+            fs.readdirSync(baseDir, { withFileTypes: true })
+                .filter(e => e.isDirectory())
+                .forEach(e => {
+                    try {
+                        const fullPath = path.join(baseDir, e.name);
+                        const stat = fs.statSync(fullPath);
+                        if (stat.mtimeMs < cutoff) {
+                            fs.rmSync(fullPath, { recursive: true, force: true });
+                            console.log(`[🗑] Startup cleanup: removed ${fullPath}`);
+                        }
+                    } catch { }
+                });
+        } catch { }
+    }
+}
+setTimeout(runStartupCleanup, 5000); // Run 5s after startup
+
 // ─── /stream endpoint ─────────────────────────────────────────────────────────
 app.get('/stream', (req, res) => {
     const magnetURI = req.query.magnet;
     if (!magnetURI) return res.status(400).send('Missing "magnet" query parameter.');
 
+    // Fast path: if file already exists on disk, serve directly (no hash check wait)
+    const existingFile = findExistingFile(magnetURI);
+    if (existingFile) {
+        serveFileFromDisk(existingFile, req, res);
+        return;
+    }
+
     getTorrent(magnetURI, (torrent) => {
         handleStream(torrent, req, res, magnetURI);
     });
 });
+
 
 function handleStream(torrent, req, res, magnetURI) {
     if (!torrent || !torrent.files || torrent.files.length === 0) {
@@ -218,6 +312,16 @@ app.get('/info', (req, res) => {
 
     console.log(`[i] Info request: ${magnetURI.substring(0, 60)}...`);
 
+    // Fast path: if file already exists on disk, return info immediately (no hash check wait)
+    const existingFile = findExistingFile(magnetURI);
+    if (existingFile) {
+        const fileName = path.basename(existingFile);
+        const ext = fileName.toLowerCase().split('.').pop();
+        const size = fs.statSync(existingFile).size;
+        console.log(`[i] Found on disk: ${fileName}`);
+        return res.json({ name: fileName, size, extension: ext, streamUrl: `/stream?magnet=${encodeURIComponent(magnetURI)}` });
+    }
+
     getTorrent(magnetURI, (torrent) => {
         if (!torrent || !torrent.files || torrent.files.length === 0) {
             return res.status(500).json({ error: 'No files in torrent' });
@@ -232,6 +336,7 @@ app.get('/info', (req, res) => {
         });
     });
 });
+
 
 // ─── /status endpoint ─────────────────────────────────────────────────────────
 app.get('/status', (req, res) => {
