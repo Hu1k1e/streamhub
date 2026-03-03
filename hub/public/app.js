@@ -299,10 +299,14 @@ function quickProbeFromMagnet(magnet) {
 
         // Safari/iOS: restrict ONLY when we KNOW the container is non-MP4.
         // If ext is e.g. 'h264-ethel' (release group, not a file ext), we don't know
-        // the actual container — allow direct play attempt (MP4 WEB rips play fine on iOS).
+        // the actual container — allow direct play attempt ONLY for H264 (WEB rips are often MP4).
+        // For HEVC with unknown ext: HEVC releases are almost always MKV → must transcode on Safari.
         if (IS_SAFARI && extIsVideo && ext !== 'mp4' && ext !== 'm4v') {
             containerOk = false; // Known non-MP4 container on Safari → transcode via HLS
+        } else if (IS_SAFARI && !extIsVideo && isHEVC) {
+            containerOk = false; // Unknown container + HEVC on Safari → assume MKV → transcode
         }
+
 
         const canDirectPlay = codecOk && containerOk;
         console.log(`[QuickProbe] ${name} | codec:${codec}(${codecOk}) container:${ext}(${containerOk}) → ${canDirectPlay ? 'Direct' : 'Transcode'}`);

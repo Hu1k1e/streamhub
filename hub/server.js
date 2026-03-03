@@ -256,14 +256,26 @@ function determineDirectPlay(fileInfo, caps) {
                 : caps.canH264;
 
     // Container support (desktop plays MKV even when canPlayType returns false)
-    const containerOk = (ext === 'mp4' || ext === 'm4v') ? caps.canH264
+    const isSafari = req.query.safari === '1'; // used only for container logic below
+    let containerOk = (ext === 'mp4' || ext === 'm4v') ? caps.canH264
         : ext === 'webm' ? caps.canVP9 || caps.canAV1
             : ext === 'mkv' ? caps.canMkv
-                : ext === 'avi' ? false   // AVI: always transcode (browser support is poor)
-                    : true;
+                : ext === 'avi' ? false   // AVI: always transcode
+                    : true;              // Unknown container → optimistic
+
+    // Safari + HEVC + non-MP4 container (or unknown container): HEVC is almost always
+    // in MKV which Safari cannot play. Force transcode even if canPlayType says hevc=true.
+    if (isSafari && isHEVC && ext !== 'mp4' && ext !== 'm4v') {
+        containerOk = false;
+    }
+    // Safari + known non-MP4 container: transcode
+    if (isSafari && ext && ext !== 'mp4' && ext !== 'm4v' && ['mkv', 'webm', 'avi', 'ts', 'mov'].includes(ext)) {
+        containerOk = false;
+    }
 
     return codecOk && containerOk;
 }
+
 
 // â”€â”€â”€ Probe endpoint â€” instant, no ffprobe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/probe', async (req, res) => {
