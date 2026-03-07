@@ -6,3 +6,7 @@ macOS/
 # Compose files with real secrets — only push the .example version
 hub/docker-compose.yml
 streamer/.env
+
+# Private planning documents — never push to public repo
+instructions.md
+project_specs.md

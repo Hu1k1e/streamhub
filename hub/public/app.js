@@ -566,6 +566,7 @@ let _videoPlayingHandler = null;
 let _videoWaitingHandler = null;
 let _videoTimeupdateHandler = null;
 let _videoCanPlayHandler = null;
+let _videoErrorHandler = null;
 
 function setupVideoCallbacks(video, overlay, isTranscoding) {
     // Remove previous listeners
@@ -573,6 +574,7 @@ function setupVideoCallbacks(video, overlay, isTranscoding) {
     if (_videoWaitingHandler) video.removeEventListener('waiting', _videoWaitingHandler);
     if (_videoTimeupdateHandler) video.removeEventListener('timeupdate', _videoTimeupdateHandler);
     if (_videoCanPlayHandler) video.removeEventListener('canplay', _videoCanPlayHandler);
+    if (_videoErrorHandler) video.removeEventListener('error', _videoErrorHandler);
 
     function hideOverlay() {
         overlay.style.opacity = '0';
@@ -598,6 +600,16 @@ function setupVideoCallbacks(video, overlay, isTranscoding) {
         document.getElementById('buffer-status-text').innerText = isTranscoding ? 'Buffering (transcoded)...' : 'Buffering from peers...';
     };
 
+    // Error handler: surface stream failures instead of hanging on the overlay
+    _videoErrorHandler = () => {
+        const err = video.error;
+        const code = err ? err.code : '?';
+        console.error('[Player] Video element error', code, err ? err.message : '');
+        overlay.style.display = 'flex'; overlay.style.opacity = '1';
+        document.getElementById('buffer-status-text').innerText = `Stream error (é${code}) — please close and retry`;
+        document.getElementById('buffer-bar-container').style.display = 'none';
+    };
+
     let lastProgressEmit = 0;
     _videoTimeupdateHandler = () => {
         if (socket && video.duration > 0) {
@@ -612,6 +624,7 @@ function setupVideoCallbacks(video, overlay, isTranscoding) {
     video.addEventListener('canplay', _videoCanPlayHandler);
     video.addEventListener('playing', _videoPlayingHandler);
     video.addEventListener('waiting', _videoWaitingHandler);
+    video.addEventListener('error', _videoErrorHandler);
     video.addEventListener('timeupdate', _videoTimeupdateHandler);
 
     // Skip controls
