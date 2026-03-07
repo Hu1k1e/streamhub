@@ -28,19 +28,23 @@ router.post('/start', async (req, res) => {
 
     const rawStreamUrl = `${config.streamerUrl}/stream?magnet=${encodeURIComponent(magnet)}`;
 
-    // Warm up streamer with exponential back-off before starting FFmpeg
+    // Warm up streamer: call /info which waits for torrent metadata to be ready.
+    // We capture the response to avoid a separate ffprobe on the live /stream URL
+    // (probing /stream takes 12s+ to start and returns 0 duration, breaking HLS).
     log.info(`Warming up streamer for: ${(parseMagnetDn(magnet) || {}).name || magnet.substring(0, 60)}`);
     const axios = require('axios');
     let warmedUp = false;
+    let infoData = null;
     let delay = config.streamerWarmupRetryBase;
     const deadline = Date.now() + config.streamerWarmupTimeoutMs;
 
     for (let i = 0; i < config.streamerWarmupMaxRetries; i++) {
         try {
-            await axios.get(`${config.streamerUrl}/info?magnet=${encodeURIComponent(magnet)}`, {
+            const resp = await axios.get(`${config.streamerUrl}/info?magnet=${encodeURIComponent(magnet)}`, {
                 timeout: 30_000,
             });
-            log.info(`Streamer warmup OK (attempt ${i + 1})`);
+            infoData = resp.data;
+            log.info(`Streamer warmup OK (attempt ${i + 1}) — file: ${infoData.name || '?'} size: ${(infoData.size / 1e9).toFixed(2)} GB`);
             warmedUp = true;
             break;
         } catch (err) {
@@ -59,7 +63,10 @@ router.post('/start', async (req, res) => {
     }
 
     try {
-        const result = await hls.createSession({ magnet, codec, resolution }, rawStreamUrl);
+        const result = await hls.createSession(
+            { magnet, codec, resolution, infoData },
+            rawStreamUrl,
+        );
         return res.json(result);
     } catch (err) {
         log.error(`createSession failed: ${err.message}`);

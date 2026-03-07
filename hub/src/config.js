@@ -28,7 +28,7 @@ const config = {
     // HLS transcoding
     hlsOutputBase: optional('HLS_OUTPUT_BASE', '/tmp/hls_sessions'),
     hlsSegmentSec: parseInt(optional('HLS_SEGMENT_SEC', '2'), 10),
-    hlsReadySegments: parseInt(optional('HLS_READY_SEGMENTS', '2'), 10),  // min segs before ready
+    hlsReadySegments: parseInt(optional('HLS_READY_SEGMENTS', '1'), 10),  // min segs before ready
     hlsReadyTimeoutMs: parseInt(optional('HLS_READY_TIMEOUT_MS', '90000'), 10),
 
     // Warmup: streamer /info retry config

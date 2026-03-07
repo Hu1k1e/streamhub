@@ -60,11 +60,17 @@ function removeDir(dir) {
 // FFprobe duration
 // ─────────────────────────────────────────────────────────────────────────────
 
-function probeDuration(streamUrl) {
+
+/**
+ * Probe file duration via ffprobe.
+ * timeoutMs: how long to wait before giving up (default 20s).
+ * Returns 0 on failure — callers must handle the 0 case gracefully.
+ */
+function probeDurationFast(streamUrl, timeoutMs = 20_000) {
     return new Promise((resolve) => {
         const args = [
             '-v', 'error',
-            '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
+            '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
             '-show_entries', 'format=duration',
             '-of', 'default=noprint_wrappers=1:nokey=1',
             streamUrl,
@@ -74,9 +80,28 @@ function probeDuration(streamUrl) {
         proc.stdout.on('data', d => { out += d; });
         proc.on('close', () => resolve(parseFloat(out.trim()) || 0));
         proc.on('error', () => resolve(0));
-        setTimeout(() => { try { proc.kill(); } catch (_) { } resolve(0); }, 60_000);
+        const timer = setTimeout(() => {
+            try { proc.kill(); } catch (_) { }
+            resolve(0);
+        }, timeoutMs);
+        proc.on('close', () => clearTimeout(timer));
     });
 }
+
+/**
+ * Update an EVENT playlist in-place with currently available .ts segments.
+ * Called once segments exist so Safari/iOS gets a playable playlist immediately.
+ */
+function _updateEventPlaylist(session) {
+    const segs = listSegments(session.outputDir);
+    if (!segs.length) return;
+    let m3u8 = '#EXTM3U\n#EXT-X-VERSION:3\n';
+    m3u8 += `#EXT-X-TARGETDURATION:${session.segSec}\n`;
+    m3u8 += '#EXT-X-PLAYLIST-TYPE:EVENT\n\n';
+    segs.forEach(seg => { m3u8 += `#EXTINF:${session.segSec}.000000,\n${seg}\n`; });
+    try { fs.writeFileSync(session.playlistPath, m3u8); } catch (_) { }
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FFmpeg process management
@@ -267,12 +292,13 @@ function destroySession(sessionId) {
  * Create a new HLS transcode session.
  * Waits for FFmpeg to produce `config.hlsReadySegments` segments before resolving.
  *
- * @param {{ magnet: string, codec?: string, resolution?: string }} opts
+ * @param {{ magnet: string, codec?: string, resolution?: string, infoData?: object }} opts
+ *   infoData — optional response from /info endpoint (has .name, .size, .extension)
  * @param {string} rawStreamUrl  — e.g. http://streamer:6987/stream?magnet=...
  * @returns {Promise<{ sessionId, playlistUrl, status, duration }>}
  */
 async function createSession(opts, rawStreamUrl) {
-    const { magnet, resolution } = opts;
+    const { magnet, resolution, infoData } = opts;
     const sessionId = uuidv4();
     const outputDir = path.join(config.hlsOutputBase, sessionId);
     const segSec = config.hlsSegmentSec;
@@ -282,16 +308,42 @@ async function createSession(opts, rawStreamUrl) {
     ensureDir(outputDir);
     log.info(`Session created: ${shortId} — ${rawStreamUrl.substring(0, 80)}`);
 
-    // Probe duration
-    log.info(`Probing duration [${shortId}]…`);
-    const totalDuration = await probeDuration(rawStreamUrl);
-    log.info(`Duration [${shortId}]: ${totalDuration.toFixed(1)}s`);
+    // ── Duration probe ──────────────────────────────────────────────────────────
+    // Probing the live /stream URL is unreliable: the WebTorrent stream takes
+    // 12s+ to start responding, so ffprobe almost always returns 0.
+    //
+    // Strategy:
+    //  1. If /info already gave us the file path (future enhancement), probe that.
+    //  2. Otherwise probe the rawStreamUrl but with a short 20s timeout.
+    //     If that fails (returns 0), proceed without duration — use EVENT playlist.
+    let totalDuration = 0;
 
-    // Pre-write VOD playlist if duration is known
+    if (infoData && infoData.duration && infoData.duration > 0) {
+        // /info explicitly provided duration
+        totalDuration = infoData.duration;
+        log.info(`Duration from /info [${shortId}]: ${totalDuration.toFixed(1)}s`);
+    } else {
+        // Probe with a short timeout — if stream isn't ready yet, we get 0 quickly
+        // rather than blocking for 60s
+        log.info(`Probing duration [${shortId}]…`);
+        totalDuration = await probeDurationFast(rawStreamUrl, 20_000);
+        log.info(`Duration [${shortId}]: ${totalDuration.toFixed(1)}s`);
+    }
+
+    // ── Pre-write VOD playlist if duration is known ─────────────────────────────
     const playlistPath = path.join(outputDir, 'index.m3u8');
     if (totalDuration > 0) {
         writeVodPlaylist(playlistPath, totalDuration, segSec);
         log.info(`VOD playlist pre-written [${shortId}]: ${Math.ceil(totalDuration / segSec)} segments`);
+    } else {
+        // Write a minimal live EVENT playlist so Safari/iOS gets something immediately
+        log.info(`Duration unknown [${shortId}] — will serve EVENT playlist`);
+        const eventM3u8 = [
+            '#EXTM3U', '#EXT-X-VERSION:3',
+            `#EXT-X-TARGETDURATION:${segSec}`,
+            '#EXT-X-PLAYLIST-TYPE:EVENT', '',
+        ].join('\n');
+        fs.writeFileSync(playlistPath, eventM3u8);
     }
 
     const session = {
@@ -304,7 +356,7 @@ async function createSession(opts, rawStreamUrl) {
         cleanupTimer: null,
         totalDuration, segSec,
         seekGen: 0,
-        consumers: 0,   // reference count: active stream readers / playlist fetches
+        consumers: 0,
         ffmpegProc: null,
     };
     sessions.set(sessionId, session);
@@ -312,7 +364,8 @@ async function createSession(opts, rawStreamUrl) {
     // Start FFmpeg
     session.ffmpegProc = spawnFfmpeg(sessionId, 'h264_nvenc', 0, 0, 0);
 
-    // Wait for first segments before returning "ready" to the client
+    // Wait for first segment before returning "ready" to the client
+    // (1 segment = ~2s of video for immediate playback start)
     const ready = await waitForSegments(
         outputDir,
         config.hlsReadySegments,
@@ -327,6 +380,11 @@ async function createSession(opts, rawStreamUrl) {
 
     log.info(`Session ready [${shortId}] — ${listSegments(outputDir).length} segment(s) available`);
 
+    // Update EVENT playlist to include the first ready segment
+    if (totalDuration === 0) {
+        _updateEventPlaylist(session);
+    }
+
     return {
         sessionId,
         playlistUrl: `/api/hls/${sessionId}/index.m3u8`,
@@ -334,6 +392,7 @@ async function createSession(opts, rawStreamUrl) {
         duration: totalDuration,
     };
 }
+
 
 /**
  * Seek to a new time position: kill old FFmpeg, delete old .ts files, restart.
