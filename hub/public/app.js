@@ -565,19 +565,32 @@ function attachHlsInstance(video, overlay, statusText, playlistUrl, seekToTime) 
 let _videoPlayingHandler = null;
 let _videoWaitingHandler = null;
 let _videoTimeupdateHandler = null;
+let _videoCanPlayHandler = null;
 
 function setupVideoCallbacks(video, overlay, isTranscoding) {
     // Remove previous listeners
     if (_videoPlayingHandler) video.removeEventListener('playing', _videoPlayingHandler);
     if (_videoWaitingHandler) video.removeEventListener('waiting', _videoWaitingHandler);
     if (_videoTimeupdateHandler) video.removeEventListener('timeupdate', _videoTimeupdateHandler);
+    if (_videoCanPlayHandler) video.removeEventListener('canplay', _videoCanPlayHandler);
+
+    function hideOverlay() {
+        overlay.style.opacity = '0';
+        setTimeout(() => { overlay.style.display = 'none'; }, 400);
+        document.getElementById('buffer-percentage').innerText = '';
+        document.getElementById('buffer-bar-container').style.display = 'none';
+    }
+
+    // 'canplay' fires as soon as the browser has enough data to start — hide overlay immediately
+    // and trigger play() in case the initial autoplay call was deferred or blocked.
+    _videoCanPlayHandler = () => {
+        hideOverlay();
+        video.play().catch(() => { }); // safe no-op if already playing
+    };
 
     _videoPlayingHandler = () => {
         videoHasPlayed = true; // arm the seek handler once video has actually played
-        overlay.style.opacity = '0';
-        setTimeout(() => { overlay.style.display = 'none'; }, 500);
-        document.getElementById('buffer-percentage').innerText = '';
-        document.getElementById('buffer-bar-container').style.display = 'none';
+        hideOverlay();
     };
 
     _videoWaitingHandler = () => {
@@ -596,6 +609,7 @@ function setupVideoCallbacks(video, overlay, isTranscoding) {
         }
     };
 
+    video.addEventListener('canplay', _videoCanPlayHandler);
     video.addEventListener('playing', _videoPlayingHandler);
     video.addEventListener('waiting', _videoWaitingHandler);
     video.addEventListener('timeupdate', _videoTimeupdateHandler);
