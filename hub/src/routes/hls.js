@@ -87,7 +87,8 @@ router.post('/seek/:sessionId', (req, res) => {
     return res.json(result);
 });
 
-// ── POST /api/hls/stop/:sessionId ────────────────────────────────────────────
+// ── POST /api/hls/stop/:sessionId (also accepts sendBeacon) ──────────────────
+// sendBeacon sends Content-Type: text/ping with no body — handle gracefully.
 router.post('/stop/:sessionId', (req, res) => {
     const { sessionId } = req.params;
     hls.stopSession(sessionId);

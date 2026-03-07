@@ -711,6 +711,23 @@ window.addEventListener('popstate', (e) => {
     else if (e.state.view === 'login') location.reload();
 });
 
+// ─── Stop stream on tab close / refresh / navigate away ──────────────────────
+// Uses sendBeacon so the stop request fires even when the page is being torn down.
+window.addEventListener('beforeunload', () => {
+    if (activeSessionId) {
+        navigator.sendBeacon(`/api/hls/stop/${activeSessionId}`);
+    }
+});
+
+// iOS / mobile: page enters background (user switches app, locks screen)
+// visibilitychange fires 'hidden' when app is backgrounded — stop FFmpeg to save resources.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && activeSessionId) {
+        // Use sendBeacon for reliability when page is being hidden
+        navigator.sendBeacon(`/api/hls/stop/${activeSessionId}`);
+    }
+});
+
 document.getElementById('btn-back').addEventListener('click', () => history.back());
 document.getElementById('btn-close-player').addEventListener('click', () => { stopCurrentStream(); history.back(); });
 document.getElementById('btn-history').addEventListener('click', () => { history.pushState({ view: 'history' }, 'History', '/history'); showHistoryView(); });

@@ -23,6 +23,9 @@ const log = makeLogger('HLS');
 // sessionId → session object
 const sessions = new Map();
 
+// magnet → sessionId: stopped sessions waiting for possible resume (within 5-min cleanup)
+const pausedByMagnet = new Map();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +284,8 @@ function destroySession(sessionId) {
 
     removeDir(s.outputDir);
     sessions.delete(sessionId);
+    // Clean up pause-resume index if this is the paused entry
+    if (pausedByMagnet.get(s.magnet) === sessionId) pausedByMagnet.delete(s.magnet);
     log.info(`Session destroyed: ${sessionId.substring(0, 8)}`);
 }
 
@@ -299,6 +304,41 @@ function destroySession(sessionId) {
  */
 async function createSession(opts, rawStreamUrl) {
     const { magnet, resolution, infoData } = opts;
+
+    // ── Resume paused session for same magnet ──────────────────────────────────
+    // If the user exited and re-opens the same movie within the 5-minute cleanup
+    // window, reuse the existing segments rather than starting over.
+    const pausedId = pausedByMagnet.get(magnet);
+    if (pausedId) {
+        const paused = sessions.get(pausedId);
+        if (paused) {
+            const shortId = pausedId.substring(0, 8);
+            log.info(`Resuming paused session [${shortId}] for same magnet`);
+
+            // Cancel pending cleanup timer
+            clearTimeout(paused.cleanupTimer);
+            paused.cleanupTimer = null;
+
+            // Restart FFmpeg from last known segment (keeps already-downloaded segments)
+            const seg = (paused.lastSegment || 0) + 1; // start one ahead of last complete
+            const startTime = seg * paused.segSec;
+            paused.seekGen = (paused.seekGen || 0) + 1;
+            paused.status = 'transcoding';
+            paused.ffmpegProc = spawnFfmpeg(pausedId, 'h264_nvenc', seg, startTime, paused.seekGen);
+
+            // Remove from paused index — session is live again
+            pausedByMagnet.delete(magnet);
+
+            log.info(`Resumed [${shortId}] — restarting from seg ${seg} (t=${startTime.toFixed(1)}s)`);
+            return {
+                sessionId: pausedId,
+                playlistUrl: `/api/hls/${pausedId}/index.m3u8`,
+                status: 'transcoding',
+                duration: paused.totalDuration,
+            };
+        }
+    }
+
     const sessionId = uuidv4();
     const outputDir = path.join(config.hlsOutputBase, sessionId);
     const segSec = config.hlsSegmentSec;
@@ -431,6 +471,8 @@ function seekSession(sessionId, seekTime) {
 
 /**
  * Stop a session: kill FFmpeg immediately, schedule 5-min cleanup.
+ * Saves the session in pausedByMagnet so it can be resumed if the user
+ * re-opens the same movie within the cleanup window.
  */
 function stopSession(sessionId) {
     const s = sessions.get(sessionId);
@@ -447,8 +489,19 @@ function stopSession(sessionId) {
         s.status = 'stopped';
     }
 
+    // Record last known segment so resume can restart FFmpeg from there
+    const segs = listSegments(s.outputDir);
+    if (segs.length > 0) {
+        // Last segment index from filename (seg00012.ts → 12)
+        const last = segs[segs.length - 1].replace('seg', '').replace('.ts', '');
+        s.lastSegment = parseInt(last, 10) || 0;
+    }
+
+    // Index this session by magnet for possible resume
+    pausedByMagnet.set(s.magnet, sessionId);
+
     scheduleCleanup(sessionId, config.hlsCleanupDelayMs);
-    log.info(`Session stopped [${shortId}] — cleanup in ${config.hlsCleanupDelayMs / 1000}s`);
+    log.info(`Session stopped [${shortId}] — cleanup in ${config.hlsCleanupDelayMs / 1000}s, last seg: ${s.lastSegment || 0}`);
 }
 
 /**
