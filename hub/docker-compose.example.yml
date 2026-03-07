@@ -1,0 +1,64 @@
+version: '3.8'
+
+# =============================================================================
+# H-TV StreamHub — Example Docker Compose
+# =============================================================================
+# Copy this to docker-compose.yml and fill in the values.
+# NEVER commit docker-compose.yml (with real secrets) to git.
+# =============================================================================
+
+services:
+  streamhub:
+    build: .
+    container_name: streamhub
+    # Remove the 'runtime: nvidia' line if your Hub doesn't have an NVIDIA GPU.
+    # The system will fall back to libx264 (software) encoding automatically.
+    runtime: nvidia
+    ports:
+      - "3000:3000"
+    environment:
+      # ── NVIDIA GPU (required for NVENC hardware transcoding) ──────────────────
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
+      # ── TMDB (required — get your key at https://developer.themoviedb.org) ──
+      - TMDB_API_KEY=your_tmdb_api_key_here
+
+      # ── Prowlarr (torrent indexer aggregator) ────────────────────────────────
+      - PROWLARR_URL=http://your_prowlarr_ip:9696
+      - PROWLARR_API_KEY=your_prowlarr_api_key_here
+
+      # ── Streamer (Windows machine behind VPN) ────────────────────────────────
+      # The internal/VPN IP of the Windows machine running streamer/server.js
+      - STREAMER_URL=http://your_windows_machine_ip:6987
+
+      # ── Jellyfin (optional — enables "Watch in Jellyfin" button) ─────────────
+      - JELLYFIN_URL=http://your_jellyfin_ip:8096
+      - JELLYFIN_EXTERNAL_URL=https://media.yourdomain.com
+      - JELLYFIN_API_KEY=your_jellyfin_api_key_here
+
+      # ── Jellyseerr / Overseerr (optional — enables media requests) ────────────
+      - JELLYSEERR_URL=https://request.yourdomain.com
+      - JELLYSEERR_API_KEY=your_jellyseerr_api_key_here
+
+      # ── HLS Transcoding ───────────────────────────────────────────────────────
+      - HLS_OUTPUT_BASE=/hls_temp
+      - HLS_SEGMENT_SEC=2
+      - HLS_READY_SEGMENTS=2
+      - HLS_READY_TIMEOUT_MS=90000
+      - HLS_CLEANUP_DELAY_MS=300000
+
+      # ── Streamer warmup ───────────────────────────────────────────────────────
+      - STREAMER_WARMUP_MAX_RETRIES=10
+      - STREAMER_WARMUP_TIMEOUT_MS=90000
+
+      # ── Logging ───────────────────────────────────────────────────────────────
+      - LOG_LEVEL=INFO
+
+    volumes:
+      # Watch history database
+      - ./data:/app/data
+      # HLS temp segments (mapped from host /tmp/hls_temp)
+      - /tmp/hls_temp:/hls_temp
+
+    restart: unless-stopped
