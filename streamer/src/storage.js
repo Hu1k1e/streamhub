@@ -25,26 +25,47 @@ export function getDiskFreeBytes(drivePath) {
 }
 
 // ── Download path selection ────────────────────────────────────────────────────
+/**
+ * Choose the best download directory.
+ *
+ * Logic:
+ *  - Large file (> LARGE_FILE_THRESHOLD_GB) → always use FALLBACK_DL_PATH
+ *  - Small file + DEFAULT_DL_PATH configured → use default path (if enough space)
+ *  - No paths configured → let WebTorrent use its own temp dir (return undefined)
+ *
+ * NOTE: fileSizeBytes = 0 means size not yet known (pre-metadata). In that case
+ * we do not route to the fallback — we treat it as a normal file.
+ */
 export function pickDownloadPath(fileSizeBytes = 0) {
     const { defaultDlPath, fallbackDlPath, largeFileTHresholdGb } = config;
 
-    if (!defaultDlPath && !fallbackDlPath) return undefined;
-
     const thresholdBytes = largeFileTHresholdGb * 1024 * 1024 * 1024;
+    const isLargeFile = fileSizeBytes > 0 && fileSizeBytes > thresholdBytes;
 
-    if (defaultDlPath && (fileSizeBytes === 0 || fileSizeBytes <= thresholdBytes)) {
-        const freeBytes = getDiskFreeBytes(defaultDlPath);
-        const needed = fileSizeBytes > 0 ? fileSizeBytes * 1.1 : 0;
-        if (freeBytes > needed) return defaultDlPath;
-        log.warn(`Default path low on space (${(freeBytes / 1e9).toFixed(1)} GB free) — using fallback`);
-    }
-
-    if (fallbackDlPath) {
+    // ── Large file: route to fallback if configured ────────────────────────────
+    if (isLargeFile && fallbackDlPath) {
         if (!fs.existsSync(fallbackDlPath)) fs.mkdirSync(fallbackDlPath, { recursive: true });
-        log.info(`Using fallback path: ${fallbackDlPath}`);
+        log.info(`Large file (${(fileSizeBytes / 1e9).toFixed(2)} GB > ${largeFileTHresholdGb} GB) → fallback: ${fallbackDlPath}`);
         return fallbackDlPath;
     }
 
+    // ── Normal file: use explicitly configured default path ────────────────────
+    if (defaultDlPath) {
+        const freeBytes = getDiskFreeBytes(defaultDlPath);
+        const needed = fileSizeBytes > 0 ? fileSizeBytes * 1.1 : 0;
+        if (freeBytes > needed) {
+            return defaultDlPath;
+        }
+        // Default path is low on space — try fallback
+        log.warn(`Default path low on space (${(freeBytes / 1e9).toFixed(1)} GB free) — using fallback`);
+        if (fallbackDlPath) {
+            if (!fs.existsSync(fallbackDlPath)) fs.mkdirSync(fallbackDlPath, { recursive: true });
+            log.info(`Using fallback path: ${fallbackDlPath}`);
+            return fallbackDlPath;
+        }
+    }
+
+    // ── No path configured: let WebTorrent choose its own temp location ────────
     return undefined;
 }
 

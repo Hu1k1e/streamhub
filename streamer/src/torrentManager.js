@@ -123,7 +123,16 @@ function _attachTorrentListeners(key, torrent) {
     if (torrent._streamHubListenersAttached) return;
     torrent._streamHubListenersAttached = true;
     torrent.on('error', (err) => log.error(`Torrent error [${torrent.name || key.substring(0, 12)}]: ${err.message}`));
-    torrent.on('warning', (warn) => log.warn(`Torrent warning [${torrent.name || key.substring(0, 12)}]: ${warn}`));
+    torrent.on('warning', (warn) => {
+        const msg = typeof warn === 'string' ? warn : warn?.message || String(warn);
+        // Tracker timeouts are expected — many public trackers are unreliable UDP endpoints.
+        // Suppress at DEBUG to keep production logs clean.
+        if (msg.includes('tracker') && (msg.includes('timed out') || msg.includes('ETIMEDOUT') || msg.includes('ECONNREFUSED'))) {
+            log.debug(`Tracker timeout [${torrent.name || key.substring(0, 12)}]: ${msg}`);
+        } else {
+            log.warn(`Torrent warning [${torrent.name || key.substring(0, 12)}]: ${msg}`);
+        }
+    });
 }
 
 function _onMetadataReady(key, torrent) {

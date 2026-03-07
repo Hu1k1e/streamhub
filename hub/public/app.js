@@ -615,8 +615,21 @@ function startProgressPolling(magnet, statusText, pctText, barFill) {
                 const pct = (data.progress * 100).toFixed(1);
                 pctText.innerText = `${pct}%`;
                 barFill.style.width = `${pct}%`;
-                const mbps = (data.downloadSpeed / 1024 / 1024).toFixed(1);
-                statusText.innerText = `Buffering: ${mbps} MB/s (${data.numPeers} peers)`;
+                // Only write the "Buffering" label when the overlay is actually visible
+                // (i.e., the video is not yet playing or is re-buffering).
+                // Once video fires 'playing', the overlay opacity is 0 — we leave the text alone.
+                const video = document.getElementById('video-element');
+                const isBuffering = video.paused || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+                if (isBuffering) {
+                    const mbps = (data.downloadSpeed / 1024 / 1024).toFixed(1);
+                    statusText.innerText = `Buffering: ${mbps} MB/s (${data.numPeers} peers)`;
+                }
+
+                // Auto-stop polling once fully downloaded
+                if (data.progress >= 1) {
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                }
             }
         } catch { }
     }, 1000);
