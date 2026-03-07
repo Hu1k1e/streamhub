@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { execSync } from 'child_process';
 import config from './config.js';
 import { makeLogger } from './logger.js';
@@ -120,24 +121,55 @@ function findLargestVideoIn(dir) {
 }
 
 // ── Startup cleanup ────────────────────────────────────────────────────────────
+/**
+ * Delete old torrent data left behind by previous runs.
+ *
+ * Covers:
+ *   1. config.defaultDlPath   — explicitly configured download path
+ *   2. config.fallbackDlPath  — large-file fallback path (D:\TempMovies)
+ *   3. os.tmpdir()/webtorrent — WebTorrent's own default when no path is set
+ *
+ * Removes both directories and standalone video files older than
+ * config.startupCleanupAgeHours (default: 6 hours).
+ */
 export function runStartupCleanup() {
-    const dirs = [config.defaultDlPath, config.fallbackDlPath].filter(Boolean);
+    // Always include WebTorrent's own default temp dir so files don't pile up
+    // on C: when DEFAULT_DL_PATH is not configured.
+    const wtDefaultPath = path.join(os.tmpdir(), 'webtorrent');
+
+    const dirs = [
+        ...new Set([config.defaultDlPath, config.fallbackDlPath, wtDefaultPath].filter(Boolean)),
+    ];
+
     const cutoff = Date.now() - config.startupCleanupAgeHours * 60 * 60 * 1000;
 
+    log.info(`Startup cleanup — scanning ${dirs.length} location(s), removing items older than ${config.startupCleanupAgeHours}h:`);
+    dirs.forEach(d => log.info(`  → ${d}`));
+
     for (const baseDir of dirs) {
-        if (!fs.existsSync(baseDir)) continue;
+        if (!fs.existsSync(baseDir)) {
+            log.info(`  Skipping (not found): ${baseDir}`);
+            continue;
+        }
         try {
-            fs.readdirSync(baseDir, { withFileTypes: true })
-                .filter(e => e.isDirectory())
-                .forEach(e => {
-                    try {
-                        const fullPath = path.join(baseDir, e.name);
-                        if (fs.statSync(fullPath).mtimeMs < cutoff) {
-                            fs.rmSync(fullPath, { recursive: true, force: true });
-                            log.info(`Startup cleanup removed: ${fullPath}`);
-                        }
-                    } catch (_) { }
-                });
-        } catch (_) { }
+            const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+            let removed = 0;
+            for (const entry of entries) {
+                try {
+                    const fullPath = path.join(baseDir, entry.name);
+                    const stat = fs.statSync(fullPath);
+                    if (stat.mtimeMs < cutoff) {
+                        fs.rmSync(fullPath, { recursive: true, force: true });
+                        log.info(`  Removed: ${fullPath} (age: ${Math.round((Date.now() - stat.mtimeMs) / 3600000)}h)`);
+                        removed++;
+                    }
+                } catch (e) {
+                    log.warn(`  Could not remove ${entry.name}: ${e.message}`);
+                }
+            }
+            if (removed === 0) log.info(`  Nothing to remove in: ${baseDir}`);
+        } catch (e) {
+            log.warn(`Startup cleanup scan failed for ${baseDir}: ${e.message}`);
+        }
     }
 }

@@ -23,7 +23,7 @@ const config = {
 
     // Cleanup
     cleanupDelayMs: optionalInt('CLEANUP_DELAY_MS', 5 * 60 * 1000),
-    startupCleanupAgeHours: optionalFloat('STARTUP_CLEANUP_AGE_HOURS', 12),
+    startupCleanupAgeHours: optionalFloat('STARTUP_CLEANUP_AGE_HOURS', 6),
 };
 
 export default config;

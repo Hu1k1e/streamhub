@@ -1,75 +1,147 @@
 # StreamHub 🎬
-A beautiful, Google-style movie search interface that streams high-quality WebTorrents seamlessly. 
+
+A self-hosted movie streaming app — search, click, and stream directly from torrents via a beautiful web UI. Supports direct play and hardware-transcoded HLS for all devices (including iOS/Safari).
 
 ## Features
-- **Netflix-style Dynamic Grid:** Auto-updates with trending movies.
-- **Glassmorphic UI:** Smooth animations, pill-shaped buttons, and responsive design.
-- **SPA Routing:** Seamless browser back/forward navigation using History API.
-- **Advanced Player:** Native HTML5 streaming with custom +10s / -10s skip controls.
-- **Auto-Cleanup:** Inactive streams are automatically killed and wiped from the server to save disk space.
+
+- **Movie Search** — TMDB-powered search with autocomplete and backdrop art
+- **Direct Play** — H.264/AAC content plays instantly in the browser with no transcoding
+- **HLS Transcoding** — NVENC (GPU) hardware-accelerated H.265→H.264 transcode for devices that need it (iOS, Safari)
+- **Session Resume** — Exiting and re-entering the player within 5 minutes resumes where the transcoder left off
+- **Auto-Cleanup** — Streams are automatically killed and wiped 5 minutes after the player closes
+- **Startup Cleanup** — Leftover torrent files from crashes are removed on restart
+- **Admin Panel** — Real-time active stream monitoring
+- **Watch History** — SQLite-backed per-user history
 
 ---
 
-## 🚀 Deployment (Docker & Portainer)
+## Architecture
 
-The easiest way to deploy the UI Hub is via Docker. Machine A (The Hub) pulls the image directly from the GitHub Container Registry.
-
-### 1. Prerequisites
-- Docker and Docker-Compose installed on Machine A.
-- Portainer installed on Machine A (optional, but recommended).
-- Prowlarr running locally for torrent search.
-- Machine B (Windows) running the `streamer/start.bat` script.
-
-### 2. Deploy via Portainer
-1. Open your Portainer Web UI.
-2. Go to **Stacks** > **Add stack**.
-3. Name it `streamhub`.
-4. Choose **Web editor**.
-5. Copy and paste the following `docker-compose.yml`:
-
-```yaml
-version: '3.8'
-
-services:
-  hub:
-    image: ghcr.io/svijaymohan745/streamhub:latest
-    container_name: streamhub-ui
-    ports:
-      - "3000:3000"
-    environment:
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      - PROWLARR_URL=${PROWLARR_URL}
-      - PROWLARR_API_KEY=${PROWLARR_API_KEY}
-      - STREAMER_URL=${STREAMER_URL}
-    restart: unless-stopped
+```
+Browser / Mobile Client
+       │  HTTP + WebSocket
+       ▼
+  Hub (Docker, Ubuntu)    ← ghcr.io/hu1k1e/streamhub:latest
+  ├── Express API + Socket.IO
+  ├── TMDB / Prowlarr / Jellyfin proxy
+  ├── HLS Manager (FFmpeg / NVENC)
+  └── Stream Proxy → Streamer
+             │ HTTP
+             ▼
+  Streamer (Node.js, Windows)
+  └── WebTorrent — downloads & streams raw bytes
 ```
 
-6. In the **Environment variables** section below the editor, add the required keys:
-   - `TMDB_API_KEY` (Your TMDB v3 Key)
-   - `PROWLARR_URL` (e.g., `http://192.168.1.10:9696`)
-   - `PROWLARR_API_KEY` (Your Prowlarr API Key)
-   - `STREAMER_URL` (e.g., `http://192.168.1.15:6987` - The IP of Machine B running the Streamer)
-7. Click **Deploy the stack**. 
+---
 
-### 3. Deploy via Command Line (Standard Docker-Compose)
-If you aren't using Portainer, you can simply run it from the command line:
+## Deployment
 
-1. Create a directory named `streamhub` and enter it.
-2. Create a `docker-compose.yml` file with the content above.
-3. Create a `.env` file based on the sample:
-   ```env
-   TMDB_API_KEY=your_key
-   PROWLARR_URL=http://your_prowlarr_ip:9696
-   PROWLARR_API_KEY=your_key
-   STREAMER_URL=http://your_windows_machine_ip:6987
-   ```
-4. Run `docker-compose up -d`.
+### Prerequisites
 
-### 💻 Machine B Setup (The WebTorrent Streamer)
-*Machine B handles downloading the torrent over the VPN and streaming the file bytes down to the Hub's frontend player.*
+| Requirement | Notes |
+|---|---|
+| Docker + Compose | On the Ubuntu/Linux Hub machine |
+| NVIDIA GPU + drivers | On the Hub (for NVENC transcoding) |
+| Node.js v20+ | On the Windows Streamer machine |
+| Prowlarr | Torrent indexer |
+| TMDB API key | Free at [themoviedb.org](https://www.themoviedb.org) |
 
-1. Install Node.js on the Windows VPN machine.
-2. Copy the `streamer` folder to that machine.
-3. Run `npm install` inside the folder.
-4. Run `start.bat`.
-5. Note the IP Address of Machine B. This goes in your `STREAMER_URL` environment variable for the Hub.
+### Hub — Docker
+
+1. Copy `docker-compose.example.yml` from this repo to your server and rename it `docker-compose.yml`
+2. Fill in your real credentials (TMDB key, Prowlarr URL/key, Jellyfin key, etc.)
+3. Deploy:
+
+```bash
+docker compose up -d
+```
+
+Or import the compose file into Portainer → Stacks → Add Stack.
+
+> **Image:** `ghcr.io/hu1k1e/streamhub:latest` — rebuilt automatically on every push to `main`.
+
+### Hub — Storage
+
+HLS transcoded segments are stored at:
+
+| Variable | Default (inside container) | Volume mapped to |
+|---|---|---|
+| `HLS_OUTPUT_BASE` | `/hls_temp` | `/tmp/hls_temp` on host |
+
+Sessions are cleaned up 5 minutes after the player closes. Unmapped `/hls_temp` uses container disk space.
+
+### Streamer — Windows Setup
+
+The Streamer runs on a Windows machine and handles WebTorrent downloads.
+
+```powershell
+cd streamer
+npm install
+# Create .env from the example:
+copy .env.example .env
+# Edit .env with your paths, then:
+npm start
+```
+
+**Default torrent storage paths:**
+
+| Path | When used |
+|---|---|
+| `DEFAULT_DL_PATH` (from `.env`) | Normal files — explicitly configured path |
+| `FALLBACK_DL_PATH` (default: `D:\TempMovies`) | Files > 20 GB, or when default drive is full |
+| `%LOCALAPPDATA%\Temp\webtorrent\` | When `DEFAULT_DL_PATH` is **not** set |
+
+> To free disk space now: delete everything inside `%LOCALAPPDATA%\Temp\webtorrent\`  
+> (`C:\Users\<you>\AppData\Local\Temp\webtorrent\`)
+
+Files are automatically deleted 5 minutes after the last viewer disconnects.  
+Leftover files from crashes are cleaned on startup (older than 6 hours by default).
+
+---
+
+## Environment Variables
+
+### Hub (`docker-compose.yml`)
+
+| Variable | Required | Description |
+|---|---|---|
+| `TMDB_API_KEY` | ✅ | TMDB v3 API key |
+| `PROWLARR_URL` | ✅ | e.g. `http://192.168.1.10:9696` |
+| `PROWLARR_API_KEY` | ✅ | Prowlarr API key |
+| `STREAMER_URL` | ✅ | e.g. `http://192.168.1.15:6987` |
+| `JELLYFIN_URL` | — | Internal Jellyfin base URL |
+| `JELLYFIN_EXTERNAL_URL` | — | External Jellyfin URL (for mobile) |
+| `JELLYFIN_API_KEY` | — | Jellyfin API key |
+| `HLS_OUTPUT_BASE` | — | Default: `/hls_temp` |
+| `HLS_SEGMENT_SEC` | — | Segment duration in seconds (default: `2`) |
+| `HLS_READY_SEGMENTS` | — | Segments to wait for before signalling ready (default: `1`) |
+| `HLS_CLEANUP_DELAY_MS` | — | Cleanup delay in ms (default: `300000` = 5 min) |
+
+### Streamer (`streamer/.env`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `6987` | Streamer listen port |
+| `DEFAULT_DL_PATH` | null | Where to download torrent files |
+| `FALLBACK_DL_PATH` | `D:\TempMovies` | Used for large files or when default is full |
+| `LARGE_FILE_THRESHOLD_GB` | `20` | Files above this go to fallback |
+| `CLEANUP_DELAY_MS` | `300000` | Delete torrent files after 5 min idle |
+| `STARTUP_CLEANUP_AGE_HOURS` | `6` | Remove leftovers older than this on startup |
+
+---
+
+## Development
+
+```bash
+# Hub
+cd hub && npm install && npm run dev
+
+# Streamer
+cd streamer && npm install && npm start
+```
+
+---
+
+## License
+
+MIT
