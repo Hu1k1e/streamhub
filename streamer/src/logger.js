@@ -1,5 +1,3 @@
-'use strict';
-
 const LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 const MIN_LEVEL = LEVELS[(process.env.LOG_LEVEL || 'INFO').toUpperCase()] ?? LEVELS.INFO;
 
@@ -14,7 +12,7 @@ function log(level, tag, msg) {
     else process.stdout.write(line + '\n');
 }
 
-function makeLogger(tag) {
+export function makeLogger(tag) {
     return {
         debug: (msg) => log('DEBUG', tag, msg),
         info: (msg) => log('INFO', tag, msg),
@@ -22,5 +20,3 @@ function makeLogger(tag) {
         error: (msg) => log('ERROR', tag, msg),
     };
 }
-
-module.exports = { makeLogger };

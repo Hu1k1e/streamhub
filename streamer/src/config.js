@@ -1,6 +1,5 @@
-#!/usr/bin/env node
-'use strict';
-require('dotenv').config();
+// ESM — loaded with "type":"module" in package.json
+import 'dotenv/config';
 
 function optional(name, def = null) { return process.env[name] || def; }
 function optionalInt(name, def) { const v = process.env[name]; return v ? parseInt(v, 10) : def; }
@@ -23,8 +22,8 @@ const config = {
     largeFileTHresholdGb: optionalFloat('LARGE_FILE_THRESHOLD_GB', 20),
 
     // Cleanup
-    cleanupDelayMs: optionalInt('CLEANUP_DELAY_MS', 5 * 60 * 1000),  // 5 minutes
+    cleanupDelayMs: optionalInt('CLEANUP_DELAY_MS', 5 * 60 * 1000),
     startupCleanupAgeHours: optionalFloat('STARTUP_CLEANUP_AGE_HOURS', 12),
 };
 
-module.exports = config;
+export default config;

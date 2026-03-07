@@ -1,17 +1,11 @@
-﻿'use strict';
-/**
- * Streamer — server.js (bootstrap)
- *
- * Starts the Express HTTP server on Windows.
- * All logic lives in src/.
- */
-
-const express = require('express');
-const cors = require('cors');
-const config = require('./src/config');
-const { makeLogger } = require('./src/logger');
-const { runStartupCleanup } = require('./src/storage');
-const routes = require('./src/routes');
+﻿// ESM bootstrap for the Streamer
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import config from './src/config.js';
+import { makeLogger } from './src/logger.js';
+import { runStartupCleanup } from './src/storage.js';
+import routes from './src/routes.js';
 
 const log = makeLogger('Streamer');
 const app = express();
@@ -32,11 +26,11 @@ const server = app.listen(config.port, () => {
 
 server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-        log.error(`Port ${config.port} already in use — exiting so start.bat can retry`);
+        log.error(`Port ${config.port} already in use — exiting`);
         process.exit(1);
     }
     log.error(`Server error: ${err.message}`);
 });
 
-// Startup cleanup (5s delay to avoid blocking initial boot)
+// Startup cleanup (5s delay to avoid blocking boot)
 setTimeout(runStartupCleanup, 5000);
