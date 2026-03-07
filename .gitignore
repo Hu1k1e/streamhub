@@ -10,3 +10,6 @@ streamer/.env
 # Private planning documents — never push to public repo
 instructions.md
 project_specs.md
+
+# Local-only startup scripts
+startup-streamer.bat
