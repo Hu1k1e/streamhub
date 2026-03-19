@@ -1,4 +1,4 @@
-﻿// ─── DOM References ────────────────────────────────────────────────────────────
+// ─── DOM References ────────────────────────────────────────────────────────────
 const loginView = document.getElementById('login-view');
 const searchView = document.getElementById('search-view');
 const detailsView = document.getElementById('movie-details-view');
@@ -166,9 +166,28 @@ async function loadMovieDetails(id, mediaType = 'movie', pushHistory = true) {
             const jfData = await (await fetch(`/api/jellyfin/check?title=${encodeURIComponent(title)}&tmdbId=${data.id}`)).json();
             if (jfData.exists && jfData.url && jellyfinBtn) { jellyfinBtn.href = jfData.url; jellyfinBtn.classList.remove('hidden'); }
             else if (jellyseerrConfig?.configured && requestBtn) {
-                requestBtn.style.background = '#8b5cf6'; requestBtn.style.pointerEvents = 'auto';
-                requestBtn.innerHTML = `<i class="fa-solid fa-cloud-arrow-up" style="margin-right:12px;font-size:1.2rem;"></i><span>${mediaType === 'movie' ? 'Request Movie to H-TV' : 'Request Show to H-TV'}</span>`;
-                requestBtn.classList.remove('hidden'); requestBtn.onclick = () => openRequestModal(data, mediaType);
+                // Check Jellyseerr to see if already requested before showing button
+                let alreadyRequested = false;
+                try {
+                    const statusRes = await fetch(`/api/jellyseerr/status?tmdbId=${data.id}&mediaType=${mediaType}`);
+                    const statusData = await statusRes.json();
+                    alreadyRequested = statusData.requested === true;
+                } catch { /* network error — default to showing the request button */ }
+
+                requestBtn.classList.remove('hidden');
+                if (alreadyRequested) {
+                    requestBtn.style.background = '#374151';
+                    requestBtn.style.pointerEvents = 'none';
+                    requestBtn.style.opacity = '0.8';
+                    requestBtn.innerHTML = `<i class="fa-solid fa-check" style="margin-right:12px;font-size:1.2rem;"></i><span>Already Requested</span>`;
+                    requestBtn.onclick = null;
+                } else {
+                    requestBtn.style.background = '#8b5cf6';
+                    requestBtn.style.pointerEvents = 'auto';
+                    requestBtn.style.opacity = '1';
+                    requestBtn.innerHTML = `<i class="fa-solid fa-cloud-arrow-up" style="margin-right:12px;font-size:1.2rem;"></i><span>${mediaType === 'movie' ? 'Request Movie to H-TV' : 'Request Show to H-TV'}</span>`;
+                    requestBtn.onclick = () => openRequestModal(data, mediaType);
+                }
             }
         } catch { }
 

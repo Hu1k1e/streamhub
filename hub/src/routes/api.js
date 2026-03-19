@@ -32,7 +32,7 @@ router.get('/search', async (req, res) => {
         const r = await axios.get('https://api.themoviedb.org/3/search/multi', {
             params: { api_key: config.tmdbApiKey, query: q, include_adult: false },
         });
-        res.json(r.data.results.filter(m => m.poster_path && (m.media_type === 'movie' || m.media_type === 'tv')));
+        res.json(r.data.results.filter(m => !m.adult && m.poster_path && (m.media_type === 'movie' || m.media_type === 'tv')));
     } catch (e) {
         log.error(`TMDB search failed: ${e.message}`);
         res.status(500).json({ error: 'TMDB search failed' });
@@ -70,9 +70,9 @@ router.get('/tv/:id/season/:season_number', async (req, res) => {
 router.get('/trending', async (req, res) => {
     try {
         const r = await axios.get('https://api.themoviedb.org/3/trending/movie/day', {
-            params: { api_key: config.tmdbApiKey },
+            params: { api_key: config.tmdbApiKey, include_adult: false },
         });
-        res.json(r.data.results.slice(0, 10).map(m => ({ id: m.id, title: m.title })));
+        res.json(r.data.results.filter(m => !m.adult).slice(0, 10).map(m => ({ id: m.id, title: m.title })));
     } catch (e) { res.status(500).json({ error: 'Failed to fetch trending' }); }
 });
 
@@ -80,11 +80,11 @@ router.get('/grid', async (req, res) => {
     try {
         const page = Math.floor(Math.random() * 5) + 1;
         const r = await axios.get('https://api.themoviedb.org/3/movie/popular', {
-            params: { api_key: config.tmdbApiKey, page },
+            params: { api_key: config.tmdbApiKey, page, include_adult: false },
         });
         res.json(
             r.data.results
-                .filter(m => m.poster_path)
+                .filter(m => !m.adult && m.poster_path)
                 .slice(0, 18)
                 .map(m => `https://image.tmdb.org/t/p/w200${m.poster_path}`)
         );
@@ -167,6 +167,40 @@ router.get('/jellyfin/check', async (req, res) => {
 });
 
 // ── Jellyseerr ────────────────────────────────────────────────────────────────
+
+// GET /api/jellyseerr/status?tmdbId=123&mediaType=movie
+// Returns whether this item has already been requested in Jellyseerr.
+router.get('/jellyseerr/status', async (req, res) => {
+    if (!config.jellyseerrApiKey || !config.jellyseerrUrl) return res.json({ requested: false });
+    const { tmdbId, mediaType } = req.query;
+    if (!tmdbId) return res.status(400).json({ error: 'tmdbId required' });
+    try {
+        const base = config.jellyseerrUrl.replace(/\/$/, '') + '/api/v1';
+        const key = config.jellyseerrApiKey;
+        // Jellyseerr /media endpoint returns media record if known, which includes request status
+        const r = await axios.get(`${base}/media`, {
+            headers: { 'X-Api-Key': key },
+            params: { tmdbId, mediaType: mediaType === 'tv' ? 'tv' : 'movie', take: 1 },
+        });
+        const results = r.data?.results || r.data?.media || [];
+        // Status codes: 2=pending, 3=processing, 4=partially available, 5=available
+        const media = Array.isArray(results)
+            ? results.find(m => String(m.tmdbId) === String(tmdbId))
+            : (r.data?.tmdbId && String(r.data.tmdbId) === String(tmdbId) ? r.data : null);
+        if (media && media.mediaInfo?.status >= 2) {
+            return res.json({ requested: true, status: media.mediaInfo.status });
+        }
+        if (media && media.status >= 2) {
+            return res.json({ requested: true, status: media.status });
+        }
+        return res.json({ requested: false });
+    } catch (e) {
+        log.warn(`Jellyseerr status check failed: ${e.message}`);
+        // On error, return not-requested so the user can still submit
+        return res.json({ requested: false });
+    }
+});
+
 router.get('/jellyseerr/options', async (req, res) => {
     if (!config.jellyseerrApiKey || !config.jellyseerrUrl) return res.json({ configured: false });
     try {
