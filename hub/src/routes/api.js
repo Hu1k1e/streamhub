@@ -170,6 +170,7 @@ router.get('/jellyfin/check', async (req, res) => {
 
 // GET /api/jellyseerr/status?tmdbId=123&mediaType=movie
 // Returns whether this item has already been requested in Jellyseerr.
+// Uses dedicated Jellyseerr movie/TV endpoints which return mediaInfo.status directly.
 router.get('/jellyseerr/status', async (req, res) => {
     if (!config.jellyseerrApiKey || !config.jellyseerrUrl) return res.json({ requested: false });
     const { tmdbId, mediaType } = req.query;
@@ -177,29 +178,24 @@ router.get('/jellyseerr/status', async (req, res) => {
     try {
         const base = config.jellyseerrUrl.replace(/\/$/, '') + '/api/v1';
         const key = config.jellyseerrApiKey;
-        // Jellyseerr /media endpoint returns media record if known, which includes request status
-        const r = await axios.get(`${base}/media`, {
-            headers: { 'X-Api-Key': key },
-            params: { tmdbId, mediaType: mediaType === 'tv' ? 'tv' : 'movie', take: 1 },
-        });
-        const results = r.data?.results || r.data?.media || [];
-        // Status codes: 2=pending, 3=processing, 4=partially available, 5=available
-        const media = Array.isArray(results)
-            ? results.find(m => String(m.tmdbId) === String(tmdbId))
-            : (r.data?.tmdbId && String(r.data.tmdbId) === String(tmdbId) ? r.data : null);
-        if (media && media.mediaInfo?.status >= 2) {
-            return res.json({ requested: true, status: media.mediaInfo.status });
-        }
-        if (media && media.status >= 2) {
-            return res.json({ requested: true, status: media.status });
+        // Use dedicated Jellyseerr endpoints — /movie/:id and /tv/:id return
+        // mediaInfo with status. Status codes: 2=pending, 3=processing,
+        // 4=partially available, 5=available. Any status >= 2 = already requested.
+        const endpoint = mediaType === 'tv' ? `${base}/tv/${tmdbId}` : `${base}/movie/${tmdbId}`;
+        const r = await axios.get(endpoint, { headers: { 'X-Api-Key': key } });
+        const status = r.data?.mediaInfo?.status;
+        if (status && status >= 2) {
+            return res.json({ requested: true, status });
         }
         return res.json({ requested: false });
     } catch (e) {
+        // 404 = not in Jellyseerr at all → safe to show Request button
+        if (e.response?.status === 404) return res.json({ requested: false });
         log.warn(`Jellyseerr status check failed: ${e.message}`);
-        // On error, return not-requested so the user can still submit
         return res.json({ requested: false });
     }
 });
+
 
 router.get('/jellyseerr/options', async (req, res) => {
     if (!config.jellyseerrApiKey || !config.jellyseerrUrl) return res.json({ configured: false });
