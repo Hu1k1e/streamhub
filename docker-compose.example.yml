@@ -1,64 +1,185 @@
 version: '3.8'
 
 # =============================================================================
-# H-TV StreamHub — Example Docker Compose
+# H-TV StreamHub — Full Stack (torrent-vpn)
 # =============================================================================
-# Copy this to docker-compose.yml and fill in the values.
-# NEVER commit docker-compose.yml (with real secrets) to git.
+# This stack combines:
+#   - Gluetun     : VPN kill-switch (NordVPN / any provider)
+#   - qBittorrent : Manual torrent downloader (through VPN)
+#   - Streamer    : WebTorrent streamer (through VPN)
+#   - Hub         : Frontend UI + HLS transcoder (NOT through VPN — stays reachable)
+#   - Autoheal    : Auto-restart unhealthy containers
+#
+# USAGE:
+#   Copy this to docker-compose.yml, fill in your real secrets.
+#   NEVER commit docker-compose.yml to git — it contains secrets.
+#
+# HUB → STREAMER routing:
+#   The Streamer shares Gluetun's network namespace. Gluetun exposes
+#   port 6987 to the Docker network. Hub reaches Streamer at:
+#     http://gluetun:6987
 # =============================================================================
 
 services:
-  streamhub:
-    build: .
-    container_name: streamhub
-    # Remove the 'runtime: nvidia' line if your Hub doesn't have an NVIDIA GPU.
-    # The system will fall back to libx264 (software) encoding automatically.
+
+  # ── Gluetun VPN kill-switch ─────────────────────────────────────────────────
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - 8020:8020         # qBittorrent Web UI
+      - 6881:6881         # qBittorrent Torrent Port (TCP)
+      - 6881:6881/udp     # qBittorrent Torrent Port (UDP)
+      - 9910:8000         # Gluetun Control Server Web UI
+      - 6987:6987         # StreamHub Streamer API (proxied through VPN namespace)
+    environment:
+      - VPN_SERVICE_PROVIDER=nordvpn
+      - VPN_TYPE=openvpn
+      - OPENVPN_USER=your_nordvpn_service_user
+      - OPENVPN_PASSWORD=your_nordvpn_service_password
+      - SERVER_HOSTNAMES=ca1478.nordvpn.com
+      - UPDATER_PERIOD=24h
+    restart: unless-stopped
+    labels:
+      - autoheal=true
+
+  # ── qBittorrent (through VPN) ───────────────────────────────────────────────
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - WEBUI_PORT=8020
+    volumes:
+      - /home/vj/torrent-vpn/config/qbittorrent:/config
+      - /mnt/nas/Media-Video:/downloads
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: curl -s https://1.1.1.1 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── StreamHub Streamer (through VPN) ────────────────────────────────────────
+  # All WebTorrent traffic (peers, DHT, trackers) exits through the VPN.
+  # Kill-switch: if Gluetun goes down, Streamer loses all connectivity.
+  streamer:
+    image: ghcr.io/hu1k1e/streamhub-streamer:latest
+    container_name: streamhub-streamer
+    network_mode: "service:gluetun"    # Share Gluetun's VPN network namespace
+    environment:
+      - PORT=6987
+
+      # Download directory — mapped to /mnt/nas/Media-Video on the host.
+      # Files are automatically deleted 5 minutes after the stream ends.
+      - DEFAULT_DL_PATH=/downloads
+
+      # Fallback for very large files or when primary is full.
+      # Leave the same as DEFAULT_DL_PATH if you only have one drive.
+      - FALLBACK_DL_PATH=/downloads/fallback
+
+      # Files larger than this go to FALLBACK_DL_PATH
+      - LARGE_FILE_THRESHOLD_GB=20
+
+      # WebTorrent
+      - MAX_CONNS=30
+      - MAX_ACTIVE_TORRENTS=5
+      - IDLE_RESET_MINUTES=15
+
+      # Cleanup: delete torrent files 5 min after last viewer disconnects
+      - CLEANUP_DELAY_MS=300000
+
+      # On startup: remove files older than 6h (crash recovery)
+      - STARTUP_CLEANUP_AGE_HOURS=6
+
+      - LOG_LEVEL=INFO
+
+    volumes:
+      # NAS Media-Video share — same mount as qBittorrent for consistency
+      - /mnt/nas/Media-Video:/downloads
+
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - autoheal=true
+
+  # ── StreamHub Hub (NOT through VPN — stays reachable if VPN changes IP) ─────
+  # Hub is the frontend UI and HLS transcoder. It does NOT do BitTorrent.
+  # It reaches the Streamer via Docker's internal network: http://gluetun:6987
+  hub:
+    image: ghcr.io/hu1k1e/streamhub:latest
+    container_name: streamhub-ui
+    # Remove 'runtime: nvidia' if the Ubuntu machine has no NVIDIA GPU.
+    # Falls back to libx264 (software) transcoding automatically.
     runtime: nvidia
     ports:
       - "3000:3000"
     environment:
-      # ── NVIDIA GPU (required for NVENC hardware transcoding) ──────────────────
+      # ── NVIDIA GPU (for NVENC hardware HLS transcoding) ──────────────────────
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
-      # ── TMDB (required — get your key at https://developer.themoviedb.org) ──
+      # ── TMDB ─────────────────────────────────────────────────────────────────
       - TMDB_API_KEY=your_tmdb_api_key_here
 
-      # ── Prowlarr (torrent indexer aggregator) ────────────────────────────────
+      # ── Prowlarr ─────────────────────────────────────────────────────────────
       - PROWLARR_URL=http://your_prowlarr_ip:9696
       - PROWLARR_API_KEY=your_prowlarr_api_key_here
 
-      # ── Streamer (Windows machine behind VPN) ────────────────────────────────
-      # The internal/VPN IP of the Windows machine running streamer/server.js
-      - STREAMER_URL=http://your_windows_machine_ip:6987
+      # ── Streamer ─────────────────────────────────────────────────────────────
+      # Reached via Gluetun (port 6987 exposed on gluetun container)
+      - STREAMER_URL=http://gluetun:6987
 
-      # ── Jellyfin (optional — enables "Watch in Jellyfin" button) ─────────────
+      # ── Jellyfin ─────────────────────────────────────────────────────────────
       - JELLYFIN_URL=http://your_jellyfin_ip:8096
       - JELLYFIN_EXTERNAL_URL=https://media.yourdomain.com
       - JELLYFIN_API_KEY=your_jellyfin_api_key_here
 
-      # ── Jellyseerr / Overseerr (optional — enables media requests) ────────────
+      # ── Jellyseerr ───────────────────────────────────────────────────────────
       - JELLYSEERR_URL=https://request.yourdomain.com
       - JELLYSEERR_API_KEY=your_jellyseerr_api_key_here
 
-      # ── HLS Transcoding ───────────────────────────────────────────────────────
+      # ── HLS Transcoding ──────────────────────────────────────────────────────
       - HLS_OUTPUT_BASE=/hls_temp
       - HLS_SEGMENT_SEC=2
-      - HLS_READY_SEGMENTS=2
+      - HLS_READY_SEGMENTS=1
       - HLS_READY_TIMEOUT_MS=90000
       - HLS_CLEANUP_DELAY_MS=300000
 
-      # ── Streamer warmup ───────────────────────────────────────────────────────
+      # ── Streamer warmup ──────────────────────────────────────────────────────
       - STREAMER_WARMUP_MAX_RETRIES=10
       - STREAMER_WARMUP_TIMEOUT_MS=90000
 
-      # ── Logging ───────────────────────────────────────────────────────────────
       - LOG_LEVEL=INFO
 
     volumes:
-      # Watch history database
-      - ./data:/app/data
-      # HLS temp segments (mapped from host /tmp/hls_temp)
-      - /tmp/hls_temp:/hls_temp
+      - ./data:/app/data        # Watch history database
+      - /tmp/hls_temp:/hls_temp # HLS segment temp storage
 
+    depends_on:
+      - gluetun
+    restart: unless-stopped
+
+  # ── Autoheal ────────────────────────────────────────────────────────────────
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

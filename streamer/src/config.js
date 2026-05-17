@@ -18,7 +18,7 @@ const config = {
 
     // Storage
     defaultDlPath: optional('DEFAULT_DL_PATH', null),
-    fallbackDlPath: optional('FALLBACK_DL_PATH', 'D:\\TempMovies'),
+    fallbackDlPath: optional('FALLBACK_DL_PATH', '/downloads/fallback'),
     largeFileTHresholdGb: optionalFloat('LARGE_FILE_THRESHOLD_GB', 20),
 
     // Cleanup

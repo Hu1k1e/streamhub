@@ -9,20 +9,32 @@ const log = makeLogger('Storage');
 
 const VIDEO_EXTS_RE = /\.(mp4|m4v|mkv|webm|avi|ts|mov|m2ts|mpeg|mpg)$/i;
 
-// ── Disk free space (Windows) ─────────────────────────────────────────────────
+// ── Disk free space (cross-platform) ────────────────────────────────────────
 export function getDiskFreeBytes(drivePath) {
     try {
-        const drive = path.parse(drivePath).root.replace(/\\/g, '');
-        const result = execSync(
-            `wmic logicaldisk where "DeviceID='${drive}'" get FreeSpace /value`,
-            { encoding: 'utf8', timeout: 5000 }
-        );
-        const match = result.match(/FreeSpace=(\d+)/);
-        if (match) return parseInt(match[1], 10);
+        if (process.platform === 'win32') {
+            // Windows: use wmic to query free space by drive letter
+            const drive = path.parse(drivePath).root.replace(/\\/g, '');
+            const result = execSync(
+                `wmic logicaldisk where "DeviceID='${drive}'" get FreeSpace /value`,
+                { encoding: 'utf8', timeout: 5000 }
+            );
+            const match = result.match(/FreeSpace=(\d+)/);
+            if (match) return parseInt(match[1], 10);
+        } else {
+            // Linux / macOS: df -B1 reports sizes in bytes
+            // awk NR==2 grabs the data row, $4 is the Available column
+            const result = execSync(
+                `df -B1 "${drivePath}" | awk 'NR==2{print $4}'`,
+                { encoding: 'utf8', timeout: 5000 }
+            );
+            const free = parseInt(result.trim(), 10);
+            if (!isNaN(free) && free >= 0) return free;
+        }
     } catch (e) {
         log.warn(`getDiskFreeBytes failed for ${drivePath}: ${e.message}`);
     }
-    return Infinity;
+    return Infinity; // On failure, don't block downloads
 }
 
 // ── Download path selection ────────────────────────────────────────────────────
