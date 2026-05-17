@@ -116,6 +116,14 @@ services:
       gluetun:
         condition: service_healthy
     restart: unless-stopped
+    # Autoheal monitors this healthcheck and restarts the container if unhealthy.
+    # This ensures the streamer recovers automatically when Gluetun comes back up.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6987/status?magnet=x || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     labels:
       - autoheal=true
 

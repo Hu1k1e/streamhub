@@ -1,5 +1,10 @@
 FROM node:20-slim
 
+# curl needed for the container healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+
 WORKDIR /app
 
 # Install dependencies first (layer-cache friendly)
