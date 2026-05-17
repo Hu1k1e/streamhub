@@ -116,10 +116,12 @@ services:
       gluetun:
         condition: service_healthy
     restart: unless-stopped
-    # Autoheal monitors this healthcheck and restarts the container if unhealthy.
-    # This ensures the streamer recovers automatically when Gluetun comes back up.
+    # Healthcheck tests both the streamer HTTP server AND external connectivity.
+    # When Gluetun goes down its kill-switch blocks all external traffic,
+    # so the 1.1.1.1 check fails → container goes unhealthy → autoheal restarts it.
+    # Checking only localhost:6987 is NOT sufficient — loopback works even with no VPN.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6987/status?magnet=x || exit 1"]
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:6987/status?magnet=x && curl -sf --max-time 5 https://1.1.1.1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
