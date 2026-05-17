@@ -82,13 +82,15 @@ services:
     environment:
       - PORT=6987
 
-      # Download directory — mapped to /mnt/nas/Media-Video on the host.
-      # Files are automatically deleted 5 minutes after the stream ends.
-      - DEFAULT_DL_PATH=/downloads
+      # IMPORTANT: Point to a SUBDIRECTORY, never the root of the NAS share.
+      # The streamer will ONLY read/write/delete inside this folder.
+      # This folder is created automatically on first run.
+      # Host path: /mnt/nas/Media-Video/streamhub-temp
+      - DEFAULT_DL_PATH=/downloads/streamhub-temp
 
-      # Fallback for very large files or when primary is full.
-      # Leave the same as DEFAULT_DL_PATH if you only have one drive.
-      - FALLBACK_DL_PATH=/downloads/fallback
+      # Fallback for very large files or when primary drive is full.
+      # Keep as a separate subfolder so cleanup stays isolated.
+      - FALLBACK_DL_PATH=/downloads/streamhub-temp
 
       # Files larger than this go to FALLBACK_DL_PATH
       - LARGE_FILE_THRESHOLD_GB=20
@@ -107,7 +109,7 @@ services:
       - LOG_LEVEL=INFO
 
     volumes:
-      # NAS Media-Video share — same mount as qBittorrent for consistency
+      # NAS Media-Video share — streamer only writes inside streamhub-temp/
       - /mnt/nas/Media-Video:/downloads
 
     depends_on:

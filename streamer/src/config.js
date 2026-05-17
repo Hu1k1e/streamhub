@@ -18,7 +18,7 @@ const config = {
 
     // Storage
     defaultDlPath: optional('DEFAULT_DL_PATH', null),
-    fallbackDlPath: optional('FALLBACK_DL_PATH', '/downloads/fallback'),
+    fallbackDlPath: optional('FALLBACK_DL_PATH', '/downloads/streamhub-temp'),
     largeFileTHresholdGb: optionalFloat('LARGE_FILE_THRESHOLD_GB', 20),
 
     // Cleanup
