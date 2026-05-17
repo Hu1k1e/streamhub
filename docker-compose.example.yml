@@ -187,11 +187,15 @@ services:
     restart: unless-stopped
 
   # ── Autoheal ────────────────────────────────────────────────────────────────
+  # Restarts containers that are unhealthy OR that have exited unexpectedly.
   autoheal:
     image: willfarrell/autoheal:latest
     container_name: autoheal
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
+      # Also restart exited containers (not just unhealthy running ones).
+      # This handles streamer exit-code 137 when Gluetun's network drops.
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
