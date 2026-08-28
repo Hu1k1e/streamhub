@@ -84,6 +84,13 @@ router.get('/info', (req, res) => {
     });
 });
 
+// ── GET /health ───────────────────────────────────────────────────────────────
+// Dedicated healthcheck endpoint — zero business-logic dependencies.
+// Returns 200 as long as the Express server is alive and accepting connections.
+router.get('/health', (_req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
 // ── GET /status ────────────────────────────────────────────────────────────────
 router.get('/status', (req, res) => {
     const magnetURI = req.query.magnet;
